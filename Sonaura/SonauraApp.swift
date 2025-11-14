@@ -6,12 +6,27 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct SonauraApp: App {
+    let modelContainer: ModelContainer
+    
+    init() {
+        do {
+            let schema = Schema([StoredHearingTestSession.self])
+            let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+            self.modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            fatalError("Could not create ModelContainer: \(error)")
+        }
+    }
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .modelContainer(modelContainer)
+                .environmentObject(HearingTestCoordinator())
         }
     }
 }
