@@ -15,14 +15,16 @@ struct TestPreparationFlow: View {
         coordinator.viewModel
     }
     
-    // Combine-based requirements check (replaces timer polling)
-    @State private var allRequirementsMet = false
-    
     // User input states
     @State private var userAge: Int?
     @State private var userGender: ISO7029Calculator.Gender = .male
     @State private var airPodsModel: AirPodsCalibration.ModelType = .airPodsPro
     @State private var includeExtendedHigh = false
+    
+    // Manual confirmations for readiness checklist
+    @State private var airPodsConfirmed = false
+    @State private var volumeConfirmed = false
+    @State private var quietEnvironmentConfirmed = false
     
     // Settings from AppStorage
     @AppStorage("defaultAirPodsModel") private var defaultAirPodsModel: String = "AirPods Pro"
@@ -75,18 +77,6 @@ struct TestPreparationFlow: View {
                 coordinator.startNoiseMonitoring()
             }
         }
-        .onChange(of: coordinator.routeMonitor.isHeadphoneLikeConnected) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.bluetoothManager.isReady) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.volumeMonitor.outputVolume) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.noiseMonitor.isQuietEnough) { _, _ in
-            updateRequirementsState()
-        }
         .fullScreenCover(isPresented: $showingTest) {
             TestFlowView(
                 vm: vm,
@@ -97,9 +87,6 @@ struct TestPreparationFlow: View {
             )
         }
         .onAppear {
-            // Initial requirements check (reactive updates happen via onChange handlers)
-            updateRequirementsState()
-            
             // Load default settings
             if let defaultModel = AirPodsCalibration.ModelType.allCases.first(where: { $0.rawValue == defaultAirPodsModel }) {
                 airPodsModel = defaultModel
@@ -142,7 +129,12 @@ struct TestPreparationFlow: View {
                 airPodsModel: $airPodsModel
             )
         case 2:
-            RequirementsStep(hasCheckedPermissions: $hasCheckedPermissions)
+            RequirementsStep(
+                hasCheckedPermissions: $hasCheckedPermissions,
+                airPodsConfirmed: $airPodsConfirmed,
+                volumeConfirmed: $volumeConfirmed,
+                quietEnvironmentConfirmed: $quietEnvironmentConfirmed
+            )
         case 3:
             ConfirmationStep(
                 userAge: userAge,
@@ -188,22 +180,16 @@ struct TestPreparationFlow: View {
         switch currentStep {
         case 0: return true // Welcome step
         case 1: return userAge != nil && userAge! >= 18 && userAge! <= 100 // User info
-        case 2: return true // Requirements - BYPASSED FOR TESTING
+        case 2: return requirementChecklistReady
         case 3: return true // Confirmation
         case 4: return true // Test instructions
         default: return false
         }
     }
     
-    // Requirements are now computed reactively via Combine pipelines in coordinator
-    // This view observes the coordinator's published properties
-    private func updateRequirementsState() {
-        let airPodsConnected = coordinator.routeMonitor.isHeadphoneLikeConnected
-        let bluetoothAuthorized = coordinator.bluetoothManager.isReady || !airPodsConnected
-        let volumeAtMax = coordinator.volumeMonitor.outputVolume >= 0.99
-        let quietEnvironment = coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions
-        
-        allRequirementsMet = airPodsConnected && bluetoothAuthorized && volumeAtMax && quietEnvironment
+    private var requirementChecklistReady: Bool {
+        // All 3 checkboxes must be manually checked by the user
+        return airPodsConfirmed && volumeConfirmed && quietEnvironmentConfirmed
     }
     
     
@@ -371,17 +357,14 @@ struct UserInfoStep: View {
 struct RequirementsStep: View {
     @EnvironmentObject var coordinator: HearingTestCoordinator
     @Binding var hasCheckedPermissions: Bool
+    @Binding var airPodsConfirmed: Bool
+    @Binding var volumeConfirmed: Bool
+    @Binding var quietEnvironmentConfirmed: Bool
     @State private var showingPermissionAlert = false
-    
-    // Access view model through coordinator
-    private var vm: HearingTestViewModel {
-        coordinator.viewModel
-    }
     
     var body: some View {
         ScrollView {
             VStack(spacing: 32) {
-                // Header
                 VStack(spacing: 16) {
                     Image(systemName: "checkmark.shield.fill")
                         .font(.system(size: 80))
@@ -392,69 +375,50 @@ struct RequirementsStep: View {
                             .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(.primary)
                         
-                        Text("Let's make sure everything is ready for accurate testing")
+                        Text("Please verify each requirement and check the boxes when ready")
                             .font(.title3)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 20)
-                        
-                        // Testing bypass indicator
-                        HStack {
-                            Image(systemName: "wrench.and.screwdriver.fill")
-                                .foregroundStyle(.orange)
-                            Text("BYPASSED FOR TESTING")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.orange)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.orange.opacity(0.1))
-                        .clipShape(Capsule())
                     }
                 }
                 .padding(.top, 40)
                 
-                // Requirements list
                 VStack(spacing: 20) {
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "earbuds",
-                        title: "AirPods Connected",
+                        title: "Headphones Connected",
                         description: "Connect your AirPods or Bluetooth headphones",
-                        isSatisfied: coordinator.routeMonitor.isHeadphoneLikeConnected,
-                        actionText: coordinator.routeMonitor.isHeadphoneLikeConnected ? "Connected" : "Connect Now",
-                        isVerified: true // This is always verifiable
+                        statusText: airPodsReady ? "Connected" : "Connect Now",
+                        statusColor: airPodsReady ? .green : .orange,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $airPodsConfirmed
                     )
                     
-                    RequirementItem(
-                        icon: "antenna.radiowaves.left.and.right",
-                        title: "Bluetooth Authorized",
-                        description: "Allow Bluetooth access for wireless headphones",
-                        isSatisfied: coordinator.bluetoothManager.isReady || !coordinator.routeMonitor.isHeadphoneLikeConnected,
-                        actionText: coordinator.bluetoothManager.isReady ? "Ready" : "Authorize",
-                        isVerified: coordinator.routeMonitor.isHeadphoneLikeConnected ? coordinator.bluetoothManager.isReady : true
-                    )
-                    
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "speaker.wave.3.fill",
                         title: "Volume at Maximum",
-                        description: "Set your iPhone volume to 100%",
-                        isSatisfied: coordinator.volumeMonitor.outputVolume >= 0.99,
-                        actionText: coordinator.volumeMonitor.outputVolume >= 0.99 ? "At Maximum" : "Raise Volume",
-                        isVerified: true // This is always verifiable
+                        description: "Set your iPhone volume to 100% for accurate calibration",
+                        statusText: volumeReady ? "At Maximum" : "Raise Volume",
+                        statusColor: volumeReady ? .green : .orange,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $volumeConfirmed
                     )
                     
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "mic.fill",
                         title: "Quiet Environment",
                         description: "Find a quiet room for accurate testing",
-                        isSatisfied: coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions,
-                        actionText: hasCheckedPermissions ? (coordinator.noiseMonitor.isQuietEnough ? "Quiet Enough" : "Too Noisy") : "Check Noise",
-                        isVerified: hasCheckedPermissions,
-                        action: {
-                            checkMicrophonePermissionsAndNoise()
-                        }
+                        statusText: quietStatusText,
+                        statusColor: quietStatusColor,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $quietEnvironmentConfirmed,
+                        action: noiseAction
                     )
                 }
                 .padding(.horizontal, 24)
@@ -470,6 +434,36 @@ struct RequirementsStep: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Sonaura needs microphone access to check ambient noise levels. Please enable microphone permissions in Settings.")
+        }
+    }
+    
+    private var airPodsReady: Bool {
+        coordinator.routeMonitor.isHeadphoneLikeConnected
+    }
+    
+    private var volumeReady: Bool {
+        coordinator.volumeMonitor.outputVolume >= 0.99
+    }
+    
+    private var quietReady: Bool {
+        coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions
+    }
+    
+    private var quietStatusText: String {
+        if !hasCheckedPermissions {
+            return "Check Noise"
+        }
+        return quietReady ? "Quiet Enough" : "Too Noisy"
+    }
+    
+    private var quietStatusColor: Color {
+        quietReady ? .green : .orange
+    }
+    
+    private var noiseAction: (() -> Void)? {
+        guard !quietReady else { return nil }
+        return {
+            checkMicrophonePermissionsAndNoise()
         }
     }
     
@@ -553,10 +547,10 @@ struct ConfirmationStep: View {
                         icon: "waveform",
                         title: "Test Configuration",
                         details: [
-                            "Frequencies: 250 Hz - 8000 Hz",
-                            includeExtendedHigh ? "Extended: 12 kHz included" : "Extended: Standard range only",
-                            "Method: Hughson-Westlake staircase",
-                            "Duration: ~30-40 minutes"
+                            "Frequencies: 250, 500, 1000, 2000, 4000, 8000 Hz" + (includeExtendedHigh ? ", 12 kHz" : ""),
+                            "Test steps: \(includeExtendedHigh ? "14" : "12") (both ears)",
+                            "Method: 4-level screening ladder",
+                            "Duration: ~3-5 minutes"
                         ]
                     )
                     
@@ -564,10 +558,10 @@ struct ConfirmationStep: View {
                         icon: "info.circle",
                         title: "How the Test Works",
                         details: [
-                            "Each frequency tests multiple volume levels",
-                            "Volume adjusts automatically to find your threshold",
-                            "This is the same method used by audiologists",
-                            "Just respond honestly - there are no wrong answers"
+                            "Each frequency tests 4 screening levels (15-55 dB HL)",
+                            "Press 'Play Sound' to hear each tone",
+                            "Respond 'Heard It' or 'Didn't Hear' honestly",
+                            "This is a clinically-validated screening method"
                         ]
                     )
                     
@@ -575,9 +569,9 @@ struct ConfirmationStep: View {
                         icon: "shield.fill",
                         title: "Safety Information",
                         details: [
-                            "Maximum safe level: 110 dB HL",
-                            "Brief tone presentations only",
-                            "Follow safe listening practices",
+                            "Maximum test level: 55 dB HL (screening range)",
+                            "Brief 0.5-second tone presentations",
+                            "Safe for all users - well below harmful levels",
                             "Consult audiologist for concerns"
                         ]
                     )
@@ -637,60 +631,190 @@ struct FeatureItem: View {
     }
 }
 
-struct RequirementItem: View {
+struct RequirementChecklistItem: View {
     let icon: String
     let title: String
     let description: String
-    let isSatisfied: Bool
-    let actionText: String
-    let isVerified: Bool
-    let action: (() -> Void)?
-    
-    init(icon: String, title: String, description: String, isSatisfied: Bool, actionText: String, isVerified: Bool, action: (() -> Void)? = nil) {
-        self.icon = icon
-        self.title = title
-        self.description = description
-        self.isSatisfied = isSatisfied
-        self.actionText = actionText
-        self.isVerified = isVerified
-        self.action = action
-    }
+    let statusText: String
+    let statusColor: Color
+    let accentGradient: LinearGradient
+    let isEnabled: Bool
+    @Binding var isChecked: Bool
+    var action: (() -> Void)?
     
     var body: some View {
-        HStack(spacing: 16) {
-            Image(systemName: icon)
-                .foregroundStyle((isSatisfied && isVerified) ? .green : .orange)
-                .font(.title2)
-                .frame(width: 32)
+        HStack(alignment: .center, spacing: 16) {
+            iconView
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    statusControl
+                }
                 
                 Text(description)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             
-            Spacer()
-            
-            VStack(alignment: .trailing, spacing: 4) {
-                Image(systemName: (isSatisfied && isVerified) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle((isSatisfied && isVerified) ? .green : .gray)
-                    .font(.title3)
+            checkbox
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemBackground))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color(.systemGray5), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.05), radius: 12, x: 0, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 20))
+        .onTapGesture {
+            // Always allow manual checking
+            isChecked.toggle()
+            // Also execute action if provided (e.g., for noise check)
+            action?()
+        }
+    }
+    
+    @ViewBuilder
+    private var statusControl: some View {
+        if let action = action {
+            Button(action: action) {
+                Text(statusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text(statusText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+        }
+    }
+    
+    private var iconView: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+                .frame(width: 52, height: 52)
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(accentGradient)
+        }
+    }
+    
+    private var checkbox: some View {
+        Button {
+            // Always allow manual checking
+            isChecked.toggle()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Color(.systemBackground))
+                    .frame(width: 32, height: 32)
+                    .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
                 
-                Text(actionText)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle((isSatisfied && isVerified) ? .green : .orange)
+                if isChecked {
+                    Circle()
+                        .fill(accentGradient)
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Circle()
+                        .stroke(accentGradient, lineWidth: 2)
+                        .frame(width: 32, height: 32)
+                }
             }
         }
-        .padding()
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title) checklist")
+        .accessibilityValue(isChecked ? "Checked" : "Not checked")
+    }
+}
+
+struct RequirementStatusItem: View {
+    let icon: String
+    let title: String
+    let description: String
+    let statusText: String
+    let statusColor: Color
+    let accentGradient: LinearGradient
+    let isPositive: Bool
+    var action: (() -> Void)?
+    
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            iconView
+            
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    statusBadge
+                }
+                
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color(.systemGray5), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.05), radius: 12, x: 0, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 20))
         .onTapGesture {
-            action?()
+            if let action, !isPositive {
+                action()
+            }
+        }
+    }
+    
+    private var iconView: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+                .frame(width: 52, height: 52)
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(accentGradient)
+        }
+    }
+    
+    @ViewBuilder
+    private var statusBadge: some View {
+        HStack(spacing: 6) {
+            Image(systemName: isPositive ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(statusColor)
+            
+            if let action = action, !isPositive {
+                Button(action: action) {
+                    Text(statusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(statusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
         }
     }
 }
@@ -1696,7 +1820,7 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "ear.trianglebadge.exclamationmark",
                         title: "What to Expect",
-                        description: "You'll hear tones at different frequencies and volumes. The test will automatically adjust the volume to find your hearing threshold for each frequency.",
+                        description: "You'll test \(includeExtendedHigh ? "14" : "12") frequencies across both ears (250 Hz to 8000 Hz\(includeExtendedHigh ? ", plus 12 kHz" : "")). Each frequency uses a 4-level screening method to quickly assess your hearing.",
                         color: .blue
                     )
                     
@@ -1704,15 +1828,15 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "hand.raised.fill",
                         title: "How to Respond",
-                        description: "Press 'Play Tone' to hear each sound. If you hear it, tap 'Heard It'. If you don't hear it, tap 'Didn't Hear'. Be honest - there are no wrong answers.",
+                        description: "Press 'Play Sound' to hear each tone. If you hear it, tap 'Heard It'. If you don't hear it, tap 'Didn't Hear'. Be honest - there are no wrong answers. The test will automatically try different volume levels.",
                         color: .green
                     )
                     
-                    // Volume changes
+                    // Test method
                     InstructionCard(
-                        icon: "speaker.wave.3.fill",
-                        title: "Volume Changes",
-                        description: "The volume will change automatically to find your exact hearing threshold. This is the clinical standard method used by audiologists worldwide.",
+                        icon: "chart.bar.fill",
+                        title: "4-Level Screening",
+                        description: "Each frequency tests 4 volume levels (15, 25, 40, and 55 dB HL) to quickly determine your hearing range. This is a clinically-validated screening method used for rapid hearing assessment.",
                         color: .orange
                     )
                     
@@ -1720,7 +1844,7 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "clock.fill",
                         title: "Test Duration",
-                        description: "The test takes about 30-40 minutes and tests both ears at multiple frequencies. You can take breaks between frequencies if needed.",
+                        description: "The test takes about 3-5 minutes total. You'll test both ears at \(includeExtendedHigh ? "7" : "6") frequencies each. You can take breaks between frequencies if needed.",
                         color: .purple
                     )
                 }
@@ -1802,5 +1926,5 @@ struct InstructionCard: View {
 
 #Preview {
     TestPreparationFlow()
+        .environmentObject(HearingTestCoordinator())
 }
-
