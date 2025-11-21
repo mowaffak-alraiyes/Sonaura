@@ -62,10 +62,12 @@ final class HearingTestCoordinator: ObservableObject {
     private func setupAudioSession() {
         do {
             // Single category that satisfies both playback and monitoring needs
+            // Note: Removed .defaultToSpeaker to prevent iOS from adjusting volume
+            // when switching routes. Headphones are preferred for hearing tests.
             try audioSession.setCategory(
                 .playAndRecord,
                 mode: .measurement,
-                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                options: [.allowBluetooth, .allowBluetoothA2DP]
             )
             try audioSession.setActive(true)
             
@@ -193,4 +195,3 @@ final class HearingTestCoordinator: ObservableObject {
         return audioSession
     }
 }
-
