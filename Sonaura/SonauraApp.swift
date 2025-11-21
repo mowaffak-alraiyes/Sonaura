@@ -11,6 +11,7 @@ import SwiftData
 @main
 struct SonauraApp: App {
     let modelContainer: ModelContainer
+    @StateObject private var coordinator = HearingTestCoordinator()
     
     init() {
         do {
@@ -25,8 +26,8 @@ struct SonauraApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(coordinator)
                 .modelContainer(modelContainer)
-                .environmentObject(HearingTestCoordinator())
         }
     }
 }
