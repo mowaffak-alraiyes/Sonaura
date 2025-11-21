@@ -276,4 +276,3 @@ struct AudiogramChartView: View {
     )
     .padding()
 }
-
