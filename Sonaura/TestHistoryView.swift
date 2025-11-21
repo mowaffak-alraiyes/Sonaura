@@ -957,5 +957,3 @@ struct StorageInfoRow: View {
 #Preview {
     TestHistoryView()
 }
-
-
