@@ -57,7 +57,7 @@ enum ThresholdCategory: String, Codable, Equatable {
     case moderateSevereOrWorse = "≥55 dB HL" // Likely moderately severe or worse
     
     /// Map category to approximate threshold value for ISO 7029 calculations
-    /// 
+    ///
     /// For percentile calculations, we use midpoint estimates for each range:
     /// - "≤15 dB HL": Use 7.5 dB HL (midpoint of 0-15 range) - excellent hearing
     /// - "15-25 dB HL": Use 20 dB HL (midpoint of 15-25 range) - normal hearing
