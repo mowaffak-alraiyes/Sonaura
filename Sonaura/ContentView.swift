@@ -12,6 +12,7 @@ struct ContentView: View {
     @StateObject private var dataManager = HearingTestDataManager()
     @State private var showingTestPreparation = false
     @State private var selectedTab = 0
+    @State private var hasRequestedBluetoothAccess = false
     
     // Convenience access to view model through coordinator
     private var vm: HearingTestViewModel {
@@ -98,6 +99,9 @@ struct ContentView: View {
                 dataManager.saveTestSession(session)
             }
         }
+        .onAppear {
+            requestBluetoothAuthorizationIfNeeded()
+        }
     }
     
     // MARK: - Background
@@ -105,6 +109,12 @@ struct ContentView: View {
     private var gradientBackground: some View {
         backgroundGradient
             .ignoresSafeArea()
+    }
+    
+    private func requestBluetoothAuthorizationIfNeeded() {
+        guard !hasRequestedBluetoothAccess else { return }
+        hasRequestedBluetoothAccess = true
+        coordinator.bluetoothManager.requestAccess()
     }
 
     // MARK: - Main Test View
@@ -443,8 +453,8 @@ struct ContentView: View {
                     
                     // Note about threshold estimates
                     let hasHighThresholds = session.results(for: ear).contains { $0.category == .moderateSevereOrWorse }
-                    let hasNormalThresholds = session.results(for: ear).contains { 
-                        $0.category == .excellentHearing || $0.category == .normalHearing 
+                    let hasNormalThresholds = session.results(for: ear).contains {
+                        $0.category == .excellentHearing || $0.category == .normalHearing
                     }
                     
                     if hasHighThresholds {
@@ -878,4 +888,5 @@ struct FeaturePreviewItem: View {
 
 #Preview {
     ContentView()
+        .environmentObject(HearingTestCoordinator())
 }
