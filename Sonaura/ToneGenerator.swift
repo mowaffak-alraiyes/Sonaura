@@ -157,10 +157,10 @@ final class ToneGenerator {
 
         // Ensure engine is running (it should be)
         if !engine.isRunning {
-            do { 
-                try engine.start() 
+            do {
+                try engine.start()
                 print("✅ ToneGenerator: Engine started")
-            } catch { 
+            } catch {
                 print("❌ ToneGenerator: Engine restart failed: \(error)")
             }
         } else {
@@ -223,4 +223,3 @@ final class ToneGenerator {
         }
     }
 }
-
