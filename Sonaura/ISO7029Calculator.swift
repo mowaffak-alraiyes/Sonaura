@@ -256,4 +256,3 @@ enum HearingClassification: String, CaseIterable {
         }
     }
 }
-
