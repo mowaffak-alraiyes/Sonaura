@@ -26,6 +26,7 @@ final class HearingTestCoordinator: ObservableObject {
     
     private let audioSession = AVAudioSession.sharedInstance()
     private var cancellables = Set<AnyCancellable>()
+    private var wasNoiseMonitoring: Bool = false
     
     // MARK: - Initialization
     
@@ -48,6 +49,8 @@ final class HearingTestCoordinator: ObservableObject {
             noiseMonitor: noiseMonitor
         )
         
+        viewModel.setCoordinator(self)
+
         // Setup audio session
         setupAudioSession()
         
@@ -69,12 +72,26 @@ final class HearingTestCoordinator: ObservableObject {
                 mode: .measurement,
                 options: [.allowBluetooth, .allowBluetoothA2DP]
             )
+            
+            // Prefer stereo output for proper left/right ear routing
+            // This ensures headphones receive stereo signal
+            try audioSession.setPreferredOutputNumberOfChannels(2)
+            
             try audioSession.setActive(true)
+            
+            // Log actual output configuration
+            let outputChannels = audioSession.outputNumberOfChannels
+            print("✅ HearingTestCoordinator: Audio session configured (.playAndRecord)")
+            print("🎧 Output channels: \(outputChannels) (preferred: 2)")
+            
+            // Check for Mono Audio setting (iOS Accessibility) which would mix channels
+            // Note: We can't directly detect this, but we can warn if output is mono
+            if outputChannels < 2 {
+                print("⚠️ WARNING: Output is MONO! Check iPhone Settings → Accessibility → Audio/Visual → Mono Audio (should be OFF)")
+            }
             
             isAudioSessionReady = true
             audioSessionError = nil
-            
-            print("✅ HearingTestCoordinator: Audio session configured (.playAndRecord)")
             
             // Notify components that session is ready
             notifyComponentsOfSessionReady()
@@ -92,6 +109,68 @@ final class HearingTestCoordinator: ObservableObject {
         // This is handled by passing the session reference or using the shared instance
     }
     
+    // MARK: - Tone Playback Session Management
+
+    /// Switch to playback-only category to ensure stereo A2DP output (no mic, no HFP mono)
+    func beginTonePlaybackSession() async {
+        do {
+            // Pause noise monitoring to avoid forcing HFP (mono)
+            wasNoiseMonitoring = noiseMonitor.isMonitoring
+            if wasNoiseMonitoring {
+                noiseMonitor.stopMonitoring()
+            }
+
+            // Use .playback category with .allowBluetoothA2DP for stereo A2DP output
+            // This ensures proper channel isolation on Bluetooth headphones
+            // According to Apple docs: .allowBluetoothA2DP ensures output to Bluetooth devices
+            try audioSession.setCategory(
+                .playback,
+                mode: .default,
+                options: [.allowBluetoothA2DP, .allowAirPlay]  // Added .allowAirPlay for compatibility
+            )
+            
+            // CRITICAL: Force stereo output for proper channel isolation
+            try audioSession.setPreferredOutputNumberOfChannels(2)
+            
+            try audioSession.setActive(true)
+            
+            // Verify stereo output
+            let outputChannels = audioSession.outputNumberOfChannels
+            print("🎧 Switched to .playback for tone (A2DP stereo)")
+            print("   Output channels: \(outputChannels) (preferred: 2)")
+            if outputChannels < 2 {
+                print("❌ WARNING: Output is MONO! Tones will play in both ears.")
+                print("   Check: iPhone Settings → Accessibility → Audio/Visual → Mono Audio (should be OFF)")
+            } else {
+                print("✅ Output is STEREO - channel isolation should work")
+            }
+        } catch {
+            print("❌ Failed to switch to playback category: \(error)")
+        }
+    }
+
+    /// Restore measurement category for mic/noise monitoring after tone playback
+    func endTonePlaybackSession() async {
+        do {
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.allowBluetooth, .allowBluetoothA2DP]
+            )
+            try audioSession.setPreferredOutputNumberOfChannels(2)
+            try audioSession.setActive(true)
+
+            // Resume noise monitoring if it was running
+            if wasNoiseMonitoring {
+                noiseMonitor.startMonitoring()
+            }
+
+            print("🔄 Restored .playAndRecord for monitoring")
+        } catch {
+            print("❌ Failed to restore playAndRecord category: \(error)")
+        }
+    }
+
     // MARK: - Combine Pipelines
     
     /// Replace timer-based polling with reactive Combine pipelines
