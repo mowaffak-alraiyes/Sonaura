@@ -201,6 +201,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.top, 8)
+                        
                     }
                     
                     // Play Sound Button
