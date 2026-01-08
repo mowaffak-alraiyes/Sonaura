@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AVFoundation
 
 /// Hearing Test View Model implementing fast 3-level screening protocol
 ///
@@ -55,6 +56,9 @@ final class HearingTestViewModel: ObservableObject {
     @Published var volume: VolumeMonitor!
     @Published var noiseMonitor: AmbientNoiseMonitor!
     
+    // Coordinator reference for audio session management
+    private weak var coordinator: HearingTestCoordinator?
+    
     /// Inject monitors from coordinator (called during coordinator initialization)
     func injectMonitors(
         routeMonitor: AudioRouteMonitor,
@@ -66,6 +70,11 @@ final class HearingTestViewModel: ObservableObject {
         self.bluetooth = bluetooth
         self.volume = volume
         self.noiseMonitor = noiseMonitor
+    }
+    
+    /// Set coordinator reference (called during coordinator initialization)
+    func setCoordinator(_ coordinator: HearingTestCoordinator) {
+        self.coordinator = coordinator
     }
     
     // User configuration
@@ -83,7 +92,7 @@ final class HearingTestViewModel: ObservableObject {
     private var testStartTime: Date?
     
     // Audio
-    private let generator = ToneGenerator()
+    private let tonePlayer = TonePlayer()
     
     // Test configuration
     /// Tone duration: 0.5 seconds per presentation (clinical standard for pure-tone audiometry)
@@ -170,6 +179,14 @@ final class HearingTestViewModel: ObservableObject {
         completedResults.removeAll()
         currentStepPresentations.removeAll()
         
+        // Pre-configure audio session for faster response
+        // Switch to playback mode immediately so tones play instantly when button is pressed
+        Task { @MainActor in
+            if let coordinator = coordinator {
+                await coordinator.beginTonePlaybackSession()
+            }
+        }
+        
         // Generate test sequence
         steps = makeSteps()
         
@@ -211,10 +228,12 @@ final class HearingTestViewModel: ObservableObject {
             return
         }
         
+        // Update UI immediately for instant feedback
+        currentInstructions = "Did you hear that beep?"
+        
         print("🔊 Playing sound at level \(currentLevelIndex): \(screeningLevels[currentLevelIndex]) dB HL")
         
-        // Update instructions after playing
-        currentInstructions = "Did you hear that beep?"
+        // Play tone immediately - no blocking checks
         playCurrentTone()
     }
     
@@ -228,6 +247,7 @@ final class HearingTestViewModel: ObservableObject {
         isWaitingForResponse = false
         hasPlayedCurrentTone = false
         currentLevelIndex = 0
+        tonePlayer.stop()
     }
     
     /// Generate test steps with alternating ear order per frequency
@@ -271,16 +291,34 @@ final class HearingTestViewModel: ObservableObject {
         let level = screeningLevels[currentLevelIndex]
         currentPresentationLevel = level
         
-        generator.playCalibrated(
-            frequency: step.frequencyHz,
-            levelDB: level,
-            ear: step.ear,
+        // Play tone immediately - audio session is already configured
+        // No delays or async waits for instant response
+        let earName = step.ear == .left ? "LEFT" : (step.ear == .right ? "RIGHT" : "BOTH")
+        print("🎵 Playing tone to \(earName) ear: \(step.frequencyHz) Hz at \(level) dB HL")
+        
+        let amplitude = amplitudeForTone(frequency: step.frequencyHz, levelDB: level)
+        let earChannel = self.earChannel(for: step.ear)
+        let splLevel = AirPodsCalibration.convertHLtoSPL(hlDB: level, frequency: step.frequencyHz)
+        print("🎧 TonePlayer: \(step.frequencyHz) Hz @ \(level) dB HL (~\(Int(splLevel)) dB SPL), amplitude \(String(format: "%.4f", Double(amplitude))) → \(earChannel)")
+        
+        // Play tone immediately - no delays, no async waits
+        tonePlayer.playTone(
+            frequency: Double(step.frequencyHz),
             duration: toneDuration,
-            airPodsModel: airPodsModel
+            ear: earChannel,
+            level: amplitude
         )
         
         hasPlayedCurrentTone = true
         isWaitingForResponse = true
+        
+        // Restore playAndRecord category after tone finishes (non-blocking, doesn't delay playback)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64((toneDuration + 0.1) * 1_000_000_000))
+            if let coordinator = coordinator {
+                await coordinator.endTonePlaybackSession()
+            }
+        }
     }
     
     /// Record user response and handle 4-level ladder progression
@@ -385,6 +423,13 @@ final class HearingTestViewModel: ObservableObject {
         
         print("✅ Test complete: \(completedResults.count) results collected")
         
+        // Restore audio session to playAndRecord for monitoring (non-blocking)
+        Task { @MainActor in
+            if let coordinator = coordinator {
+                await coordinator.endTonePlaybackSession()
+            }
+        }
+        
         // Create test session
         let startTime = testStartTime ?? Date() // Use current time if startTime wasn't set
         
@@ -400,6 +445,8 @@ final class HearingTestViewModel: ObservableObject {
             userAge: userAge,
             userGender: userGender
         )
+        
+        tonePlayer.stop()
         
         print("✅ Test session created: \(testSession != nil) with \(completedResults.count) results")
     }
@@ -443,5 +490,26 @@ final class HearingTestViewModel: ObservableObject {
             frequency: frequency,
             gender: userGender
         )
+    }
+    
+    private func amplitudeForTone(frequency: Int, levelDB: Double) -> Float {
+        let amplitude = AirPodsCalibration.amplitudeForTargetHL(
+            targetHL: levelDB,
+            frequency: frequency,
+            model: airPodsModel
+        )
+        let safeAmplitude = max(0.0, min(1.0, amplitude))
+        return Float(safeAmplitude)
+    }
+    
+    private func earChannel(for ear: TestEar) -> EarChannel {
+        switch ear {
+        case .left:
+            return .left
+        case .right:
+            return .right
+        case .both:
+            return .both
+        }
     }
 }
