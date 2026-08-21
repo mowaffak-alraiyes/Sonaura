@@ -174,8 +174,27 @@ struct AirPodsCalibration {
         return targetSPL - maxSPL // Negative value = attenuation needed
     }
     
-    /// Calculate amplitude multiplier (0.0-1.0) to achieve target dB HL
-    /// This is the value you'd use to multiply your audio signal
+    /// The true amplitude multiplier (0.0-1.0) needed to reach `targetHL`.
+    ///
+    /// This value is now returned **unclamped**, which is a deliberate change.
+    ///
+    /// It used to be floored by a `dynamicMinimum`, on the reasoning that low
+    /// levels round to zero in 16-bit samples and become inaudible. The
+    /// diagnosis was correct; the remedy silently corrupted the measurement.
+    /// `max(calculated, dynamicMinimum)` made tones *louder than their label*
+    /// across the whole 15-25 dB HL band — the exact normal/abnormal screening
+    /// boundary. At 2 kHz on AirPods Pro the "15 dB HL" tone was presented at
+    /// roughly 25 dB HL (+9.8 dB), and the 15 and 25 dB HL rungs, meant to sit
+    /// 10 dB apart, ended up about 2 dB apart. Every error ran in the same
+    /// direction: users heard tones they should not have, so the app reported
+    /// **better hearing than reality** — a false negative in a screening tool.
+    ///
+    /// The quantisation problem is real and is solved where it belongs, in
+    /// `TonePlayer`: samples are written at a fixed carrier amplitude that
+    /// quantises cleanly, and the attenuation down to this value is applied by
+    /// `AVAudioPlayer.volume`, which operates in the float domain and has no
+    /// 16-bit floor. A level that still cannot be reached is refused outright
+    /// rather than presented at the wrong loudness.
     static func amplitudeForTargetHL(
         targetHL: Double,
         frequency: Int,
@@ -186,7 +205,7 @@ struct AirPodsCalibration {
             frequency: frequency,
             model: model
         )
-        // Convert dB to amplitude: amplitude = 10^(dB/20)
+        // amplitude = 10^(dB/20)
         return pow(10.0, attenuationDB / 20.0)
     }
     

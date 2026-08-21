@@ -57,7 +57,7 @@ enum ThresholdCategory: String, Codable, Equatable {
     case moderateSevereOrWorse = "≥55 dB HL" // Likely moderately severe or worse
     
     /// Map category to approximate threshold value for ISO 7029 calculations
-    /// 
+    ///
     /// For percentile calculations, we use midpoint estimates for each range:
     /// - "≤15 dB HL": Use 7.5 dB HL (midpoint of 0-15 range) - excellent hearing
     /// - "15-25 dB HL": Use 20 dB HL (midpoint of 15-25 range) - normal hearing
@@ -77,6 +77,33 @@ enum ThresholdCategory: String, Codable, Equatable {
     /// Display name for UI
     var displayName: String {
         return rawValue
+    }
+
+    /// The user-facing label after the v2 reframe (PRD.md §3.1). Descriptive,
+    /// not diagnostic: says what was observed, never a clinical band or a
+    /// "loss" verdict. `displayName`/`rawValue` (the dB HL band itself) still
+    /// exist for anywhere that genuinely needs the clinical string — an
+    /// expandable "for the curious" detail, the PDF export's fine print — but
+    /// the default surface should read `gentleLabel`.
+    var gentleLabel: String {
+        switch self {
+        case .excellentHearing: return "Sharp response"
+        case .normalHearing: return "Typical response"
+        case .mildLoss: return "Softer response"
+        case .moderateLoss: return "Noticeably reduced response"
+        case .moderateSevereOrWorse: return "Much reduced response — worth a real checkup"
+        }
+    }
+
+    /// Which side of the reframed "steady / worth a look" vocabulary this
+    /// category falls on (SonauraResultTone, in DesignSystem/SonauraTheme.swift).
+    /// Kept as a plain string here rather than importing SwiftUI into a model
+    /// file; the view layer maps it to a color.
+    var gentleTone: String {
+        switch self {
+        case .excellentHearing, .normalHearing, .mildLoss: return "steady"
+        case .moderateLoss, .moderateSevereOrWorse: return "attention"
+        }
     }
 }
 

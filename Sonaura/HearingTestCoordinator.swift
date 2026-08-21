@@ -26,6 +26,7 @@ final class HearingTestCoordinator: ObservableObject {
     
     private let audioSession = AVAudioSession.sharedInstance()
     private var cancellables = Set<AnyCancellable>()
+    private var wasNoiseMonitoring: Bool = false
     
     // MARK: - Initialization
     
@@ -48,6 +49,8 @@ final class HearingTestCoordinator: ObservableObject {
             noiseMonitor: noiseMonitor
         )
         
+        viewModel.setCoordinator(self)
+
         // Setup audio session
         setupAudioSession()
         
@@ -58,29 +61,51 @@ final class HearingTestCoordinator: ObservableObject {
     // MARK: - Audio Session Setup
     
     /// Configure audio session once for both playback and recording
+    /// Performance: Runs async to avoid blocking UI, but stays on MainActor for audio session
     /// Uses .playAndRecord category to support both tone playback and noise monitoring
     private func setupAudioSession() {
-        do {
-            // Single category that satisfies both playback and monitoring needs
-            try audioSession.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-            )
-            try audioSession.setActive(true)
+        // Performance: Setup audio session asynchronously to avoid blocking main thread
+        Task { @MainActor in
+            // Yield to allow UI to render first
+            await Task.yield()
             
-            isAudioSessionReady = true
-            audioSessionError = nil
-            
-            print("✅ HearingTestCoordinator: Audio session configured (.playAndRecord)")
-            
-            // Notify components that session is ready
-            notifyComponentsOfSessionReady()
-            
-        } catch {
-            isAudioSessionReady = false
-            audioSessionError = error.localizedDescription
-            print("❌ HearingTestCoordinator: Audio session setup failed: \(error)")
+            do {
+                // Single category that satisfies both playback and monitoring needs
+                // Note: Removed .defaultToSpeaker to prevent iOS from adjusting volume
+                // when switching routes. Headphones are preferred for hearing tests.
+                try audioSession.setCategory(
+                    .playAndRecord,
+                    mode: .measurement,
+                    options: [.allowBluetooth, .allowBluetoothA2DP]
+                )
+                
+                // Prefer stereo output for proper left/right ear routing
+                // This ensures headphones receive stereo signal
+                try audioSession.setPreferredOutputNumberOfChannels(2)
+                
+                try audioSession.setActive(true)
+                
+                // Log actual output configuration
+                let outputChannels = audioSession.outputNumberOfChannels
+                print("✅ HearingTestCoordinator: Audio session configured (.playAndRecord)")
+                print("🎧 Output channels: \(outputChannels) (preferred: 2)")
+                
+                // Check for Mono Audio setting (iOS Accessibility) which would mix channels
+                if outputChannels < 2 {
+                    print("⚠️ WARNING: Output is MONO! Check iPhone Settings → Accessibility → Audio/Visual → Mono Audio (should be OFF)")
+                }
+                
+                isAudioSessionReady = true
+                audioSessionError = nil
+                
+                // Notify components that session is ready
+                notifyComponentsOfSessionReady()
+                
+            } catch {
+                isAudioSessionReady = false
+                audioSessionError = error.localizedDescription
+                print("❌ HearingTestCoordinator: Audio session setup failed: \(error)")
+            }
         }
     }
     
@@ -90,6 +115,70 @@ final class HearingTestCoordinator: ObservableObject {
         // This is handled by passing the session reference or using the shared instance
     }
     
+    // MARK: - Tone Playback Session Management
+
+    /// Switch to playback-only category to ensure stereo A2DP output (no mic, no HFP mono)
+    /// Performance: Runs async to avoid blocking UI, but stays on MainActor for audio session
+    func beginTonePlaybackSession() async {
+        // Performance: Audio session must be on main thread, but we can yield to avoid blocking
+        await Task.yield()
+        
+        do {
+            // Pause noise monitoring to avoid forcing HFP (mono)
+            wasNoiseMonitoring = noiseMonitor.isMonitoring
+            if wasNoiseMonitoring {
+                noiseMonitor.stopMonitoring()
+            }
+
+            // Use .playback category with .allowBluetoothA2DP for stereo A2DP output
+            // This ensures proper channel isolation on Bluetooth headphones
+            try audioSession.setCategory(
+                .playback,
+                mode: .default,
+                options: [.allowBluetoothA2DP, .allowAirPlay]
+            )
+            
+            // CRITICAL: Force stereo output for proper channel isolation
+            try audioSession.setPreferredOutputNumberOfChannels(2)
+            
+            try audioSession.setActive(true)
+            
+            // Quick check (minimal logging for performance)
+            let outputChannels = audioSession.outputNumberOfChannels
+            if outputChannels < 2 {
+                print("⚠️ Output is MONO - check Mono Audio setting")
+            }
+            
+        } catch {
+            print("❌ Failed to switch to playback category: \(error)")
+        }
+    }
+
+    /// Restore measurement category for mic/noise monitoring after tone playback
+    /// Performance: Runs async to avoid blocking UI, but stays on MainActor for audio session
+    func endTonePlaybackSession() async {
+        // Performance: Audio session must be on main thread, but we can yield to avoid blocking
+        await Task.yield()
+        
+        do {
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.allowBluetooth, .allowBluetoothA2DP]
+            )
+            try audioSession.setPreferredOutputNumberOfChannels(2)
+            try audioSession.setActive(true)
+
+            // Resume noise monitoring if it was running
+            if wasNoiseMonitoring {
+                noiseMonitor.startMonitoring()
+            }
+            
+        } catch {
+            print("❌ Failed to restore playAndRecord category: \(error)")
+        }
+    }
+
     // MARK: - Combine Pipelines
     
     /// Replace timer-based polling with reactive Combine pipelines
@@ -193,4 +282,3 @@ final class HearingTestCoordinator: ObservableObject {
         return audioSession
     }
 }
-

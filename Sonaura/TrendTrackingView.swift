@@ -494,7 +494,7 @@ struct TrendTrackingView: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )

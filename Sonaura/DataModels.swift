@@ -31,14 +31,51 @@ final class StoredHearingTestSession {
         self.id = session.id
         self.startTime = session.startTime
         self.endTime = session.endTime
-        self.deviceModel = session.deviceModel
-        self.userAge = session.userAge
-        self.userGender = session.userGender?.rawValue ?? "male"
         
-        // Encode results to JSON
+        // OWASP: Validate and sanitize device model input
+        do {
+            self.deviceModel = try SecurityValidator.validateDeviceModel(session.deviceModel)
+        } catch {
+            // Fallback to sanitized version if validation fails
+            self.deviceModel = (try? SecurityValidator.validateAndSanitizeString(session.deviceModel, maxLength: 100)) ?? "Unknown"
+        }
+        
+        // OWASP: Validate age input
+        if let age = session.userAge {
+            do {
+                self.userAge = try SecurityValidator.validateAge(age)
+            } catch {
+                // Invalid age - don't store it
+                self.userAge = nil
+            }
+        } else {
+            self.userAge = nil
+        }
+        
+        // OWASP: Validate gender input
+        do {
+            self.userGender = try SecurityValidator.validateGender(session.userGender?.rawValue ?? "male")
+        } catch {
+            // Fallback to default
+            self.userGender = "male"
+        }
+        
+        // OWASP: Validate JSON data size and structure
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        self.resultsData = (try? encoder.encode(session.results)) ?? Data()
+        
+        if let jsonData = try? encoder.encode(session.results) {
+            // Validate JSON data before storing
+            do {
+                self.resultsData = try SecurityValidator.validateJSONData(jsonData, maxSize: 1_000_000)
+            } catch {
+                // If validation fails, use empty data (better than corrupted data)
+                print("⚠️ Security: JSON data validation failed: \(error.localizedDescription)")
+                self.resultsData = Data()
+            }
+        } else {
+            self.resultsData = Data()
+        }
     }
     
     /// Convert back to HearingTestSession for display
@@ -115,28 +152,74 @@ class HearingTestDataManager: ObservableObject {
         }
     }
     
-    /// Save a new test session
+    /// Save a new test session with rate limiting
+    /// OWASP: Rate limit data operations to prevent abuse
     func saveTestSession(_ session: HearingTestSession) {
-        let storedSession = StoredHearingTestSession(from: session)
-        modelContext.insert(storedSession)
-        
-        do {
-            try modelContext.save()
-            loadTestSessions() // Refresh the list
-        } catch {
-            print("Failed to save test session: \(error)")
+        // OWASP: Rate limiting for data save operations
+        Task { @MainActor in
+            do {
+                // Stable per-install identity. A fresh UUID per call made the
+                // rate-limit key unique every time, so the limit never tripped
+                // and RateLimiter.requestHistory grew without bound.
+                let userIdentifier = HearingTestViewModel.rateLimitIdentity
+                _ = try await AppRateLimiter.checkLimit(
+                    action: "data_save",
+                    identifier: userIdentifier,
+                    config: RateLimiter.RateLimitConfig(maxRequests: 50, timeWindow: 60)
+                )
+                
+                // Proceed with save
+                let storedSession = StoredHearingTestSession(from: session)
+                modelContext.insert(storedSession)
+                
+                do {
+                    try modelContext.save()
+                    loadTestSessions() // Refresh the list
+                } catch {
+                    print("Failed to save test session: \(error)")
+                }
+                
+            } catch let error as SecurityValidationError {
+                print("⚠️ Rate limit exceeded for save: \(error.localizedDescription)")
+                // Don't save if rate limited
+            } catch {
+                print("❌ Unexpected error: \(error)")
+            }
         }
     }
     
-    /// Delete a test session
+    /// Delete a test session with rate limiting
+    /// OWASP: Rate limit delete operations to prevent abuse
     func deleteTestSession(_ session: StoredHearingTestSession) {
-        modelContext.delete(session)
-        
-        do {
-            try modelContext.save()
-            loadTestSessions() // Refresh the list
-        } catch {
-            print("Failed to delete test session: \(error)")
+        Task { @MainActor in
+            do {
+                // OWASP: Rate limiting for delete operations
+                // Stable per-install identity. A fresh UUID per call made the
+                // rate-limit key unique every time, so the limit never tripped
+                // and RateLimiter.requestHistory grew without bound.
+                let userIdentifier = HearingTestViewModel.rateLimitIdentity
+                _ = try await AppRateLimiter.checkLimit(
+                    action: "data_delete",
+                    identifier: userIdentifier,
+                    config: .dataDelete
+                )
+                
+                // Proceed with delete
+                modelContext.delete(session)
+                
+                do {
+                    try modelContext.save()
+                    loadTestSessions() // Refresh the list
+                } catch {
+                    print("Failed to delete test session: \(error)")
+                }
+                
+            } catch let error as SecurityValidationError {
+                print("⚠️ Rate limit exceeded for delete: \(error.localizedDescription)")
+                // Don't delete if rate limited
+            } catch {
+                print("❌ Unexpected error: \(error)")
+            }
         }
     }
     

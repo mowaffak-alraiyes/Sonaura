@@ -124,9 +124,10 @@ struct TestHistoryView: View {
         }
     }
     
+    /// See docs/design-system.md §1 — one accent, no stock gradient.
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -255,9 +256,10 @@ struct TestHistoryRow: View {
         .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
     }
     
+    /// See docs/design-system.md §1 — one accent, no stock gradient.
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -555,19 +557,41 @@ struct TestResultDetailView: View {
                         $0.category == .excellentHearing || $0.category == .normalHearing
                     }
                     
-                    if hasHighThresholds {
-                        Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                    // CRITICAL: Always show explanatory note about screening resolution
+                    // Percentiles are estimates based on threshold ranges, not exact measurements
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("📊 Percentile Estimates")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        
+                        Text("Percentiles shown are estimates based on screening threshold ranges, not exact measurements. The test uses 4-level screening (15, 25, 40, 55 dB HL) which brackets your threshold within a range:")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("• ≤15 dB HL → uses 7.5 dB HL (midpoint of 0-15 range)")
+                            Text("• 15-25 dB HL → uses 20 dB HL (midpoint of 15-25 range)")
+                            Text("• 25-40 dB HL → uses 32.5 dB HL (midpoint of 25-40 range)")
+                            Text("• 40-55 dB HL → uses 47.5 dB HL (midpoint of 40-55 range)")
+                            Text("• ≥55 dB HL → uses 70 dB HL (conservative estimate)")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        
+                        if hasHighThresholds {
+                            Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .padding(.top, 2)
+                        }
                     }
-                    
-                    if hasNormalThresholds {
-                        Text("Note: Percentiles are estimates based on screening categories. For '≤15 dB HL', we use 7.5 dB HL (midpoint). For '15-25 dB HL', we use 20 dB HL (midpoint). For young adults, even small differences from 0 dB HL can show higher percentiles.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
-                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        Color(.systemGray6).opacity(0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, 8)
                     
                     let earResults = session.results(for: ear).sorted { $0.frequencyHz < $1.frequencyHz }
                     ForEach(earResults) { result in
@@ -584,7 +608,7 @@ struct TestResultDetailView: View {
     }
     
     private func frequencyResultRow(result: ThresholdResult, age: Int, gender: ISO7029Calculator.Gender) -> some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             // Colored bar based on category
             if let category = result.category {
                 RoundedRectangle(cornerRadius: 4)
@@ -602,32 +626,39 @@ struct TestResultDetailView: View {
                 .foregroundStyle(.primary)
                 .frame(width: 70, alignment: .leading)
             
-            // Category/Threshold
-            if let category = result.category {
-                Text(category.displayName)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-            } else {
-                Text("\(Int(result.thresholdDB)) dB HL")
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
+            // Category/Threshold - constrained width to prevent pushing percentile badge off screen
+            Group {
+                if let category = result.category {
+                    // Descriptive label, not the clinical dB band (PRD.md §3.1).
+                    Text(category.gentleLabel)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                } else {
+                    Text("\(Int(result.thresholdDB)) dB HL")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
             }
-            
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(0.5) // Lower priority than percentile badge
             
             // Frequency-based percentile (based on category range, not specific dB)
-            if let category = result.category {
-                frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
-            } else {
-                // Fallback to dB-based if no category
-                let percentile = ISO7029Calculator.percentile(
-                    measuredThreshold: result.thresholdDB,
-                    age: age,
-                    frequency: result.frequencyHz,
-                    gender: gender
-                )
-                percentileBadge(percentile: percentile, label: nil)
+            Group {
+                if let category = result.category {
+                    frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
+                } else {
+                    // Fallback to dB-based if no category
+                    let percentile = ISO7029Calculator.percentile(
+                        measuredThreshold: result.thresholdDB,
+                        age: age,
+                        frequency: result.frequencyHz,
+                        gender: gender
+                    )
+                    percentileBadge(percentile: percentile, label: nil)
+                }
             }
+            .layoutPriority(1.0) // Higher priority - ensure badge is always visible
+            .fixedSize(horizontal: true, vertical: false) // Prevent badge from being compressed
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
@@ -637,17 +668,10 @@ struct TestResultDetailView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
     
+    /// Two tones, not a four-color severity ramp — see the identical note in
+    /// ContentView.swift and `SonauraResultTone`.
     private func categoryColor(_ category: ThresholdCategory) -> Color {
-        switch category {
-        case .excellentHearing, .normalHearing:
-            return .green
-        case .mildLoss:
-            return .yellow
-        case .moderateLoss:
-            return .orange
-        case .moderateSevereOrWorse:
-            return .red
-        }
+        category.gentleTone == "attention" ? SonauraColor.worthALook : SonauraColor.steady
     }
     
     /// Calculate frequency-based percentile range from category
@@ -691,31 +715,32 @@ struct TestResultDetailView: View {
         }
         
         // Format as range or single value
+        // CRITICAL: All percentiles are estimates based on screening threshold ranges, not exact measurements
         let percentileText: String
         let cappedRange = abs(cappedMaxPercentile - minPercentile)
         if cappedRange < 5 {
-            // Narrow range, show single value
+            // Narrow range, show single estimated value with "~" prefix to indicate estimate
             let displayPercentile = (minPercentile + cappedMaxPercentile) / 2.0
             if displayPercentile >= 99.0 {
-                percentileText = "≤99th"
+                percentileText = "~≤99th"
             } else if displayPercentile > 50 {
-                percentileText = "≤\(Int(displayPercentile.rounded()))th"
+                percentileText = "~≤\(Int(displayPercentile.rounded()))th"
             } else if displayPercentile < 50 {
-                percentileText = "Better than \(Int((100 - displayPercentile).rounded()))%"
+                percentileText = "~Better than \(Int((100 - displayPercentile).rounded()))%"
             } else {
-                percentileText = "50th"
+                percentileText = "~50th"
             }
         } else {
-            // Show range (capped at 15)
+            // Show range (capped at 15) with "~" prefix to indicate estimate
             let minRounded = Int(minPercentile.rounded())
             let maxRounded = Int(cappedMaxPercentile.rounded())
             let displayAvg = (minPercentile + cappedMaxPercentile) / 2.0
             if displayAvg >= 99.0 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else if displayAvg > 50 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else {
-                percentileText = "\(minRounded)-\(maxRounded)th"
+                percentileText = "~\(minRounded)-\(maxRounded)th"
             }
         }
         
@@ -731,6 +756,7 @@ struct TestResultDetailView: View {
                 badgeColor.opacity(0.15)
             )
             .clipShape(Capsule())
+            .help("Percentile estimate based on screening threshold range (\(category.displayName)). Actual threshold may vary within this range.")
     }
     
     private func categoryMinThreshold(_ category: ThresholdCategory) -> Double {
@@ -758,15 +784,16 @@ struct TestResultDetailView: View {
         let isWorse = percentile > 50
         
         // Format percentile with ≤ symbol for "worse than" cases
+        // CRITICAL: Add "~" prefix to indicate this is an estimate
         let percentileText: String
         if percentile >= 99.0 {
-            percentileText = "≤99th percentile"
+            percentileText = "~≤99th percentile"
         } else if percentile > 50 {
-            percentileText = "≤\(Int(percentile.rounded()))th percentile"
+            percentileText = "~≤\(Int(percentile.rounded()))th percentile"
         } else if percentile < 50 {
-            percentileText = "Better than \(Int((100 - percentile).rounded()))%"
+            percentileText = "~Better than \(Int((100 - percentile).rounded()))%"
         } else {
-            percentileText = "50th percentile (average)"
+            percentileText = "~50th percentile (average)"
         }
         
         // Use blue/purple gradient for worse than average, green for better
@@ -790,6 +817,7 @@ struct TestResultDetailView: View {
             badgeColor.opacity(0.15)
         )
         .clipShape(Capsule())
+        .help("Percentile estimate based on screening threshold range. Actual threshold may vary within the category range.")
     }
     
     private func interpretPTA(_ pta: Double) -> String {
@@ -844,9 +872,10 @@ struct TestResultDetailView: View {
         }
     }
     
+    /// See docs/design-system.md §1 — one accent, no stock gradient.
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -917,9 +946,10 @@ struct StorageInfoView: View {
         }
     }
     
+    /// See docs/design-system.md §1 — one accent, no stock gradient.
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -945,9 +975,10 @@ struct StorageInfoRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
     
+    /// See docs/design-system.md §1 — one accent, no stock gradient.
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -957,5 +988,3 @@ struct StorageInfoRow: View {
 #Preview {
     TestHistoryView()
 }
-
-

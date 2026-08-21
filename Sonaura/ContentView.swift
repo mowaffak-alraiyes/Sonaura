@@ -12,6 +12,7 @@ struct ContentView: View {
     @StateObject private var dataManager = HearingTestDataManager()
     @State private var showingTestPreparation = false
     @State private var selectedTab = 0
+    @State private var hasRequestedBluetoothAccess = false
     
     // Convenience access to view model through coordinator
     private var vm: HearingTestViewModel {
@@ -19,8 +20,11 @@ struct ContentView: View {
     }
     
     // Pre-computed gradients for better performance
+    /// The single accent, replacing the stock blue→purple gradient that was
+    /// previously declared independently in two places in this file. See
+    /// docs/design-system.md §1: one saturated color in the whole system.
     private let accentGradient = LinearGradient(
-        colors: [Color.blue, Color.purple],
+        colors: [SonauraColor.accent, SonauraColor.accent],
         startPoint: .leading,
         endPoint: .trailing
     )
@@ -44,15 +48,20 @@ struct ContentView: View {
                     VStack(spacing: 24) {
                         if vm.isRunning {
                             testInProgressView
+                                .transition(.opacity.combined(with: .scale))
                         } else if let session = vm.testSession {
                             resultsView(session: session)
+                                .transition(.opacity.combined(with: .move(edge: .bottom)))
                         } else {
                             mainTestView
+                                .transition(.opacity)
                         }
                     }
                     .padding(24)
                     .frame(maxWidth: 900)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .animation(.easeInOut(duration: 0.3), value: vm.isRunning)
+                    .animation(.easeInOut(duration: 0.3), value: vm.testSession != nil)
                 }
                 .navigationTitle("Sonaura")
                 .navigationBarTitleDisplayMode(.inline)
@@ -64,7 +73,7 @@ struct ContentView: View {
             }
             .tabItem {
                 Image(systemName: "waveform")
-                Text("Test")
+                Text("Check")
             }
             .tag(0)
             
@@ -93,10 +102,18 @@ struct ContentView: View {
                 .tag(3)
         }
         .onChange(of: vm.testSession) { _, newSession in
-            // Save test session when completed
+            // Performance: Save on background thread to avoid blocking UI
             if let session = newSession {
-                dataManager.saveTestSession(session)
+                Task.detached(priority: .utility) {
+                    await MainActor.run {
+                        dataManager.saveTestSession(session)
+                    }
+                }
             }
+        }
+        .onAppear {
+            // Performance: Only run once
+            requestBluetoothAuthorizationIfNeeded()
         }
     }
     
@@ -105,6 +122,12 @@ struct ContentView: View {
     private var gradientBackground: some View {
         backgroundGradient
             .ignoresSafeArea()
+    }
+    
+    private func requestBluetoothAuthorizationIfNeeded() {
+        guard !hasRequestedBluetoothAccess else { return }
+        hasRequestedBluetoothAccess = true
+        coordinator.bluetoothManager.requestAccess()
     }
 
     // MARK: - Main Test View
@@ -118,11 +141,11 @@ struct ContentView: View {
                     .foregroundStyle(accentGradient)
                 
                 VStack(spacing: 12) {
-                    Text("Sonaura Test")
+                    Text("Sound Check")
                         .font(.system(size: 36, weight: .bold, design: .rounded))
                         .foregroundStyle(.primary)
                     
-                    Text("Measure your hearing sensitivity using clinically-validated methods")
+                    Text("A gentle, repeatable way to notice how your hearing changes over time.")
                         .font(.title3)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -133,10 +156,15 @@ struct ContentView: View {
             }
             
             // Quick start button
-            Button(action: { showingTestPreparation = true }) {
+            Button(action: {
+                // Performance: Animate transition smoothly
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    showingTestPreparation = true
+                }
+            }) {
                 HStack {
                     Image(systemName: "play.circle.fill")
-                    Text("Start Sonaura Test")
+                    Text("Start a Sound Check")
                 }
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.white)
@@ -149,10 +177,10 @@ struct ContentView: View {
             
             // Features preview
             VStack(alignment: .leading, spacing: 16) {
-                FeaturePreviewItem(icon: "checkmark.shield.fill", text: "Clinically-validated Hughson-Westlake method")
-                FeaturePreviewItem(icon: "chart.line.uptrend.xyaxis", text: "Age-matched hearing comparisons")
+                FeaturePreviewItem(icon: "chart.line.uptrend.xyaxis", text: "Builds a trend across check-ins")
+                FeaturePreviewItem(icon: "person.2", text: "Context for your age group")
                 FeaturePreviewItem(icon: "headphones", text: "Calibrated for AirPods")
-                FeaturePreviewItem(icon: "shield.fill", text: "Safe listening guidelines")
+                FeaturePreviewItem(icon: "shield.fill", text: "Safe, brief tones — never loud")
             }
             .padding(.horizontal, 24)
             
@@ -170,7 +198,7 @@ struct ContentView: View {
             // Progress
             VStack(spacing: 12) {
                 ProgressView(value: vm.progress)
-                    .tint(Color.blue)
+                    .tint(SonauraColor.accent)
                     .scaleEffect(y: 2)
                 Text("Test \(vm.currentStepIndex + 1) of \(vm.steps.count)")
                     .font(.headline)
@@ -191,6 +219,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.top, 8)
+                        
                     }
                     
                     // Play Sound Button
@@ -206,7 +235,7 @@ struct ContentView: View {
                         .padding(.vertical, 18)
                         .background(
                             LinearGradient(
-                                colors: [Color.blue, Color.purple],
+                                colors: [SonauraColor.accent, SonauraColor.accent],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
@@ -220,31 +249,56 @@ struct ContentView: View {
                     if vm.hasPlayedCurrentTone {
                         HStack(spacing: 20) {
                             // No button
-                            Button(action: { vm.recordResponse(heard: false) }) {
+                            Button(action: { 
+                                // Performance: Animate button press
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    vm.recordResponse(heard: false)
+                                }
+                            }) {
                                 Text("No")
                                     .font(.title2.weight(.semibold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(SonauraColor.text)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 16)
-                                    .background(Color.red)
+                                    // Neutral and equal-weight, deliberately.
+                                    // These were Color.red / Color.green, which
+                                    // made a raw yes/no *input* look like a
+                                    // pass/fail *verdict* — the exact framing
+                                    // the v2 reframe retires. Not hearing a
+                                    // quiet tone is not a failure. Color now
+                                    // belongs to the result, never the input.
+                                    .background(SonauraColor.surfaceElevated)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16)
+                                            .strokeBorder(SonauraColor.border, lineWidth: 1)
+                                    )
                                     .clipShape(RoundedRectangle(cornerRadius: 16))
                             }
                             .disabled(!vm.isWaitingForResponse)
                             
                             // Yes button
-                            Button(action: { vm.recordResponse(heard: true) }) {
+                            Button(action: { 
+                                // Performance: Animate button press
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    vm.recordResponse(heard: true)
+                                }
+                            }) {
                                 Text("Yes")
                                     .font(.title2.weight(.semibold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(SonauraColor.background)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 16)
-                                    .background(Color.green)
+                                    // The affirmative gets the accent because
+                                    // it is the primary action, not because it
+                                    // is the "good" answer.
+                                    .background(SonauraColor.accent)
                                     .clipShape(RoundedRectangle(cornerRadius: 16))
                             }
                             .disabled(!vm.isWaitingForResponse)
                         }
                         .padding(.top, 8)
                         .transition(.opacity.combined(with: .scale))
+                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: vm.hasPlayedCurrentTone)
                     }
                 }
             }
@@ -340,7 +394,10 @@ struct ContentView: View {
     // MARK: - Helper Views
     
     private func earResultCard(session: HearingTestSession, ear: TestEar) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
+        // Performance: Pre-compute heavy calculations once
+        let cardData = EarResultCardData(session: session, ear: ear)
+        
+        return VStack(alignment: .leading, spacing: 20) {
             HStack {
                 Image(systemName: ear == .right ? "ear.trianglebadge.exclamationmark" : "ear.badge.checkmark")
                     .foregroundStyle(accentGradient)
@@ -352,13 +409,10 @@ struct ContentView: View {
             }
             
             // Pure Tone Average with percentile and colored bar
-            if let pta = session.pureToneAverage(ear: ear),
-               let age = session.userAge,
-               let gender = session.userGender {
-                let ptaClassification = ISO7029Calculator.classify(thresholdDB: pta)
+            if let cardData = cardData, let pta = cardData.pta {
                 HStack(spacing: 12) {
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(classificationColor(ptaClassification).opacity(0.3))
+                        .fill(classificationColor(cardData.ptaClassification).opacity(0.3))
                         .frame(width: 4, height: 60)
                     
                     VStack(alignment: .leading, spacing: 8) {
@@ -375,23 +429,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                             .padding(.top, 2)
                         
-                        // PTA Percentile - average percentile across PTA frequencies
-                        let ptaFrequencies = [500, 1000, 2000, 4000]
-                        let earResults = session.results(for: ear)
-                        let ptaResults = earResults.filter { ptaFrequencies.contains($0.frequencyHz) }
-                        let ptaPercentiles = ptaResults.map { result -> Double in
-                            ISO7029Calculator.percentile(
-                                measuredThreshold: result.thresholdDB,
-                                age: age,
-                                frequency: result.frequencyHz,
-                                gender: gender
-                            )
-                        }
-                        
-                        if !ptaPercentiles.isEmpty {
-                            let avgPercentile = ptaPercentiles.reduce(0, +) / Double(ptaPercentiles.count)
-                            let genderLabel = gender == .male ? "males" : "females"
-                            percentileBadge(percentile: avgPercentile, label: "vs \(age)-year-old \(genderLabel)")
+                        // PTA Percentile (pre-computed)
+                        if let avgPercentile = cardData.avgPercentile, let label = cardData.percentileLabel {
+                            percentileBadge(percentile: avgPercentile, label: label)
                         }
                     }
                 }
@@ -430,7 +470,7 @@ struct ContentView: View {
             Divider()
             
             // Frequency-by-frequency breakdown with percentiles
-            if let age = session.userAge, let gender = session.userGender {
+            if let cardData = cardData {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Image(systemName: "chart.bar.fill")
@@ -441,29 +481,45 @@ struct ContentView: View {
                             .foregroundStyle(.primary)
                     }
                     
-                    // Note about threshold estimates
-                    let hasHighThresholds = session.results(for: ear).contains { $0.category == .moderateSevereOrWorse }
-                    let hasNormalThresholds = session.results(for: ear).contains { 
-                        $0.category == .excellentHearing || $0.category == .normalHearing 
-                    }
-                    
-                    if hasHighThresholds {
-                        Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                    // CRITICAL: Always show explanatory note about screening resolution
+                    // Percentiles are estimates based on threshold ranges, not exact measurements
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("📊 Percentile Estimates")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        
+                        Text("Percentiles shown are estimates based on screening threshold ranges, not exact measurements. The test uses 4-level screening (15, 25, 40, 55 dB HL) which brackets your threshold within a range:")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("• ≤15 dB HL → uses 7.5 dB HL (midpoint of 0-15 range)")
+                            Text("• 15-25 dB HL → uses 20 dB HL (midpoint of 15-25 range)")
+                            Text("• 25-40 dB HL → uses 32.5 dB HL (midpoint of 25-40 range)")
+                            Text("• 40-55 dB HL → uses 47.5 dB HL (midpoint of 40-55 range)")
+                            Text("• ≥55 dB HL → uses 70 dB HL (conservative estimate)")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        
+                        if cardData.hasHighThresholds {
+                            Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .padding(.top, 2)
+                        }
                     }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        Color(.systemGray6).opacity(0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, 8)
                     
-                    if hasNormalThresholds {
-                        Text("Note: Percentiles are estimates based on screening categories. For '≤15 dB HL', we use 7.5 dB HL (midpoint). For '15-25 dB HL', we use 20 dB HL (midpoint). For young adults, even small differences from 0 dB HL can show higher percentiles.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
-                    }
-                    
-                    let earResults = session.results(for: ear).sorted { $0.frequencyHz < $1.frequencyHz }
-                    ForEach(earResults) { result in
-                        frequencyResultRow(result: result, age: age, gender: gender)
+                    // Performance: Use pre-sorted results
+                    ForEach(cardData.sortedResults) { result in
+                        frequencyResultRow(result: result, age: cardData.age, gender: cardData.gender)
                     }
                 }
             }
@@ -475,7 +531,7 @@ struct ContentView: View {
     }
     
     private func frequencyResultRow(result: ThresholdResult, age: Int, gender: ISO7029Calculator.Gender) -> some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             // Colored bar based on category
             if let category = result.category {
                 RoundedRectangle(cornerRadius: 4)
@@ -493,32 +549,39 @@ struct ContentView: View {
                 .foregroundStyle(.primary)
                 .frame(width: 70, alignment: .leading)
             
-            // Category/Threshold
-            if let category = result.category {
-                Text(category.displayName)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-            } else {
-                Text("\(Int(result.thresholdDB)) dB HL")
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
+            // Category/Threshold - constrained width to prevent pushing percentile badge off screen
+            Group {
+                if let category = result.category {
+                    // Descriptive label, not the clinical dB band (PRD.md §3.1).
+                    Text(category.gentleLabel)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                } else {
+                    Text("\(Int(result.thresholdDB)) dB HL")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
             }
-            
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(0.5) // Lower priority than percentile badge
             
             // Frequency-based percentile (based on category range, not specific dB)
-            if let category = result.category {
-                frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
-            } else {
-                // Fallback to dB-based if no category
-                let percentile = ISO7029Calculator.percentile(
-                    measuredThreshold: result.thresholdDB,
-                    age: age,
-                    frequency: result.frequencyHz,
-                    gender: gender
-                )
-                percentileBadge(percentile: percentile, label: nil)
+            Group {
+                if let category = result.category {
+                    frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
+                } else {
+                    // Fallback to dB-based if no category
+                    let percentile = ISO7029Calculator.percentile(
+                        measuredThreshold: result.thresholdDB,
+                        age: age,
+                        frequency: result.frequencyHz,
+                        gender: gender
+                    )
+                    percentileBadge(percentile: percentile, label: nil)
+                }
             }
+            .layoutPriority(1.0) // Higher priority - ensure badge is always visible
+            .fixedSize(horizontal: true, vertical: false) // Prevent badge from being compressed
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
@@ -528,17 +591,13 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
     
+    /// Two tones, not a four-color severity ramp. green→yellow→orange→red is
+    /// the pass/fail vocabulary the v2 reframe retires (PRD.md §3.4,
+    /// docs/design-system.md §1) — a routine "softer response" should not
+    /// sit on the same visual ramp as a result that genuinely warrants a
+    /// checkup. See `SonauraResultTone`.
     private func categoryColor(_ category: ThresholdCategory) -> Color {
-        switch category {
-        case .excellentHearing, .normalHearing:
-            return .green
-        case .mildLoss:
-            return .yellow
-        case .moderateLoss:
-            return .orange
-        case .moderateSevereOrWorse:
-            return .red
-        }
+        category.gentleTone == "attention" ? SonauraColor.worthALook : SonauraColor.steady
     }
     
     /// Calculate frequency-based percentile range from category
@@ -582,31 +641,32 @@ struct ContentView: View {
         }
         
         // Format as range or single value
+        // CRITICAL: All percentiles are estimates based on screening threshold ranges, not exact measurements
         let percentileText: String
         let cappedRange = abs(cappedMaxPercentile - minPercentile)
         if cappedRange < 5 {
-            // Narrow range, show single value
+            // Narrow range, show single estimated value with "~" prefix to indicate estimate
             let displayPercentile = (minPercentile + cappedMaxPercentile) / 2.0
             if displayPercentile >= 99.0 {
-                percentileText = "≤99th"
+                percentileText = "~≤99th"
             } else if displayPercentile > 50 {
-                percentileText = "≤\(Int(displayPercentile.rounded()))th"
+                percentileText = "~≤\(Int(displayPercentile.rounded()))th"
             } else if displayPercentile < 50 {
-                percentileText = "Better than \(Int((100 - displayPercentile).rounded()))%"
+                percentileText = "~Better than \(Int((100 - displayPercentile).rounded()))%"
             } else {
-                percentileText = "50th"
+                percentileText = "~50th"
             }
         } else {
-            // Show range (capped at 15)
+            // Show range (capped at 15) with "~" prefix to indicate estimate
             let minRounded = Int(minPercentile.rounded())
             let maxRounded = Int(cappedMaxPercentile.rounded())
             let displayAvg = (minPercentile + cappedMaxPercentile) / 2.0
             if displayAvg >= 99.0 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else if displayAvg > 50 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else {
-                percentileText = "\(minRounded)-\(maxRounded)th"
+                percentileText = "~\(minRounded)-\(maxRounded)th"
             }
         }
         
@@ -622,6 +682,7 @@ struct ContentView: View {
                 badgeColor.opacity(0.15)
             )
             .clipShape(Capsule())
+            .help("Percentile estimate based on screening threshold range (\(category.displayName)). Actual threshold may vary within this range.")
     }
     
     private func categoryMinThreshold(_ category: ThresholdCategory) -> Double {
@@ -649,15 +710,16 @@ struct ContentView: View {
         let isWorse = percentile > 50
         
         // Format percentile with ≤ symbol for "worse than" cases
+        // CRITICAL: Add "~" prefix to indicate this is an estimate
         let percentileText: String
         if percentile >= 99.0 {
-            percentileText = "≤99th percentile"
+            percentileText = "~≤99th percentile"
         } else if percentile > 50 {
-            percentileText = "≤\(Int(percentile.rounded()))th percentile"
+            percentileText = "~≤\(Int(percentile.rounded()))th percentile"
         } else if percentile < 50 {
-            percentileText = "Better than \(Int((100 - percentile).rounded()))%"
+            percentileText = "~Better than \(Int((100 - percentile).rounded()))%"
         } else {
-            percentileText = "50th percentile (average)"
+            percentileText = "~50th percentile (average)"
         }
         
         // Use blue/purple gradient for worse than average, green for better
@@ -681,6 +743,7 @@ struct ContentView: View {
             badgeColor.opacity(0.15)
         )
         .clipShape(Capsule())
+        .help("Percentile estimate based on screening threshold range. Actual threshold may vary within the category range.")
     }
     
     // MARK: - What This Means Section
@@ -845,6 +908,67 @@ struct ContentView: View {
     
 }
 
+// MARK: - Performance: Cached Computations
+
+/// Cached computation data for ear result card to avoid recalculating on every render
+/// Performance: Pre-computes heavy calculations once instead of in view body
+private struct EarResultCardData {
+    let pta: Double?
+    let ptaClassification: HearingClassification
+    let avgPercentile: Double?
+    let percentileLabel: String?
+    let hasHighThresholds: Bool
+    let hasNormalThresholds: Bool
+    let sortedResults: [ThresholdResult]
+    let age: Int
+    let gender: ISO7029Calculator.Gender
+    
+    init?(session: HearingTestSession, ear: TestEar) {
+        guard let age = session.userAge,
+              let gender = session.userGender else {
+            return nil
+        }
+        
+        self.age = age
+        self.gender = gender
+        
+        // Pre-compute PTA
+        self.pta = session.pureToneAverage(ear: ear)
+        self.ptaClassification = self.pta.map { ISO7029Calculator.classify(thresholdDB: $0) } ?? .normal
+        
+        // Pre-compute PTA percentiles
+        let ptaFrequencies = [500, 1000, 2000, 4000]
+        let earResults = session.results(for: ear)
+        let ptaResults = earResults.filter { ptaFrequencies.contains($0.frequencyHz) }
+        let ptaPercentiles = ptaResults.map { result -> Double in
+            ISO7029Calculator.percentile(
+                measuredThreshold: result.thresholdDB,
+                age: age,
+                frequency: result.frequencyHz,
+                gender: gender
+            )
+        }
+        
+        if !ptaPercentiles.isEmpty {
+            self.avgPercentile = ptaPercentiles.reduce(0, +) / Double(ptaPercentiles.count)
+            let genderLabel = gender == .male ? "males" : "females"
+            self.percentileLabel = "vs \(age)-year-old \(genderLabel)"
+        } else {
+            self.avgPercentile = nil
+            self.percentileLabel = nil
+        }
+        
+        // Pre-compute flags
+        self.hasHighThresholds = earResults.contains { $0.category == .moderateSevereOrWorse }
+        self.hasNormalThresholds = earResults.contains {
+            $0.category == .excellentHearing || $0.category == .normalHearing
+        }
+        
+        // Pre-sort results
+        self.sortedResults = earResults.sorted { $0.frequencyHz < $1.frequencyHz }
+    }
+}
+
 // MARK: - Helper Views
 
 struct FeaturePreviewItem: View {
@@ -852,8 +976,11 @@ struct FeaturePreviewItem: View {
     let text: String
     
     // Pre-computed gradient for better performance
+    /// The single accent, replacing the stock blue→purple gradient that was
+    /// previously declared independently in two places in this file. See
+    /// docs/design-system.md §1: one saturated color in the whole system.
     private let accentGradient = LinearGradient(
-        colors: [Color.blue, Color.purple],
+        colors: [SonauraColor.accent, SonauraColor.accent],
         startPoint: .leading,
         endPoint: .trailing
     )
@@ -878,4 +1005,5 @@ struct FeaturePreviewItem: View {
 
 #Preview {
     ContentView()
+        .environmentObject(HearingTestCoordinator())
 }

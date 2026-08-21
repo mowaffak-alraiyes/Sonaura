@@ -15,14 +15,19 @@ struct TestPreparationFlow: View {
         coordinator.viewModel
     }
     
-    // Combine-based requirements check (replaces timer polling)
-    @State private var allRequirementsMet = false
-    
     // User input states
     @State private var userAge: Int?
     @State private var userGender: ISO7029Calculator.Gender = .male
     @State private var airPodsModel: AirPodsCalibration.ModelType = .airPodsPro
     @State private var includeExtendedHigh = false
+    
+    // Security: Input validation errors
+    @State private var ageValidationError: String?
+    
+    // Manual confirmations for readiness checklist
+    @State private var airPodsConfirmed = false
+    @State private var volumeConfirmed = false
+    @State private var quietEnvironmentConfirmed = false
     
     // Settings from AppStorage
     @AppStorage("defaultAirPodsModel") private var defaultAirPodsModel: String = "AirPods Pro"
@@ -47,7 +52,7 @@ struct TestPreparationFlow: View {
                             insertion: .move(edge: .trailing).combined(with: .opacity),
                             removal: .move(edge: .leading).combined(with: .opacity)
                         ))
-                        .animation(.easeInOut(duration: 0.5), value: currentStep)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentStep)
                     
                     // Navigation buttons
                     navigationButtons
@@ -61,7 +66,8 @@ struct TestPreparationFlow: View {
                 if currentStep > 0 {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Back") {
-                            withAnimation(.easeInOut(duration: 0.5)) {
+                            // Performance: Smooth spring animation for transitions
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                 currentStep -= 1
                             }
                         }
@@ -69,23 +75,19 @@ struct TestPreparationFlow: View {
                 }
             }
         }
+        // Performance: Combine onAppear handlers to avoid redundant calls
         .onAppear {
-            // Start noise monitoring when requirements step appears
-            if currentStep == 2 { // Requirements step
+            // Load default settings (only once)
+            if let defaultModel = AirPodsCalibration.ModelType.allCases.first(where: { $0.rawValue == defaultAirPodsModel }) {
+                airPodsModel = defaultModel
+            }
+            includeExtendedHigh = defaultIncludeExtendedHigh
+        }
+        .onChange(of: currentStep) { _, newStep in
+            // Performance: Start noise monitoring when requirements step appears (not in onAppear)
+            if newStep == 2 { // Requirements step
                 coordinator.startNoiseMonitoring()
             }
-        }
-        .onChange(of: coordinator.routeMonitor.isHeadphoneLikeConnected) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.bluetoothManager.isReady) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.volumeMonitor.outputVolume) { _, _ in
-            updateRequirementsState()
-        }
-        .onChange(of: coordinator.noiseMonitor.isQuietEnough) { _, _ in
-            updateRequirementsState()
         }
         .fullScreenCover(isPresented: $showingTest) {
             TestFlowView(
@@ -95,16 +97,7 @@ struct TestPreparationFlow: View {
                 airPodsModel: airPodsModel,
                 includeExtendedHigh: includeExtendedHigh
             )
-        }
-        .onAppear {
-            // Initial requirements check (reactive updates happen via onChange handlers)
-            updateRequirementsState()
-            
-            // Load default settings
-            if let defaultModel = AirPodsCalibration.ModelType.allCases.first(where: { $0.rawValue == defaultAirPodsModel }) {
-                airPodsModel = defaultModel
-            }
-            includeExtendedHigh = defaultIncludeExtendedHigh
+            .transition(.opacity)
         }
     }
     
@@ -139,10 +132,16 @@ struct TestPreparationFlow: View {
             UserInfoStep(
                 userAge: $userAge,
                 userGender: $userGender,
-                airPodsModel: $airPodsModel
+                airPodsModel: $airPodsModel,
+                ageValidationError: $ageValidationError
             )
         case 2:
-            RequirementsStep(hasCheckedPermissions: $hasCheckedPermissions)
+            RequirementsStep(
+                hasCheckedPermissions: $hasCheckedPermissions,
+                airPodsConfirmed: $airPodsConfirmed,
+                volumeConfirmed: $volumeConfirmed,
+                quietEnvironmentConfirmed: $quietEnvironmentConfirmed
+            )
         case 3:
             ConfirmationStep(
                 userAge: userAge,
@@ -166,7 +165,8 @@ struct TestPreparationFlow: View {
         HStack(spacing: 16) {
             if currentStep < totalSteps - 1 {
                 Button("Continue") {
-                    withAnimation(.easeInOut(duration: 0.5)) {
+                    // Performance: Smooth spring animation for transitions
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         currentStep += 1
                     }
                 }
@@ -188,28 +188,22 @@ struct TestPreparationFlow: View {
         switch currentStep {
         case 0: return true // Welcome step
         case 1: return userAge != nil && userAge! >= 18 && userAge! <= 100 // User info
-        case 2: return true // Requirements - BYPASSED FOR TESTING
+        case 2: return requirementChecklistReady
         case 3: return true // Confirmation
         case 4: return true // Test instructions
         default: return false
         }
     }
     
-    // Requirements are now computed reactively via Combine pipelines in coordinator
-    // This view observes the coordinator's published properties
-    private func updateRequirementsState() {
-        let airPodsConnected = coordinator.routeMonitor.isHeadphoneLikeConnected
-        let bluetoothAuthorized = coordinator.bluetoothManager.isReady || !airPodsConnected
-        let volumeAtMax = coordinator.volumeMonitor.outputVolume >= 0.99
-        let quietEnvironment = coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions
-        
-        allRequirementsMet = airPodsConnected && bluetoothAuthorized && volumeAtMax && quietEnvironment
+    private var requirementChecklistReady: Bool {
+        // All 3 checkboxes must be manually checked by the user
+        return airPodsConfirmed && volumeConfirmed && quietEnvironmentConfirmed
     }
     
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -233,7 +227,7 @@ struct WelcomeStep: View {
                         .foregroundStyle(.primary)
                         .multilineTextAlignment(.center)
                     
-                    Text("Let's prepare your hearing test with clinically-validated methods")
+                    Text("A few quick checks so your reading is a fair one.")
                         .font(.title3)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -259,7 +253,7 @@ struct WelcomeStep: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -270,6 +264,7 @@ struct UserInfoStep: View {
     @Binding var userAge: Int?
     @Binding var userGender: ISO7029Calculator.Gender
     @Binding var airPodsModel: AirPodsCalibration.ModelType
+    @Binding var ageValidationError: String?
     
     var body: some View {
         ScrollView {
@@ -285,7 +280,7 @@ struct UserInfoStep: View {
                             .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(.primary)
                         
-                        Text("This helps us compare your results to age-matched norms")
+                        Text("This gives your reading some context for your age group.")
                             .font(.title3)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -308,10 +303,27 @@ struct UserInfoStep: View {
                             .textFieldStyle(.roundedBorder)
                             .keyboardType(.numberPad)
                             .frame(height: 50)
+                            .onChange(of: userAge) { _, newValue in
+                                // OWASP: Validate input on change
+                                ageValidationError = nil
+                                if let age = newValue {
+                                    do {
+                                        _ = try SecurityValidator.validateAge(age)
+                                    } catch {
+                                        ageValidationError = error.localizedDescription
+                                    }
+                                }
+                            }
                         
-                        Text("Ages 18-100 for best comparison accuracy")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if let error = ageValidationError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        } else {
+                            Text("Ages 18-100 for best comparison accuracy")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     
                     // Gender selection
@@ -326,7 +338,7 @@ struct UserInfoStep: View {
                         }
                         .pickerStyle(.segmented)
                         
-                        Text("Hearing norms vary slightly by gender")
+                        Text("Typical ranges vary a little by sex.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -361,7 +373,7 @@ struct UserInfoStep: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -371,17 +383,14 @@ struct UserInfoStep: View {
 struct RequirementsStep: View {
     @EnvironmentObject var coordinator: HearingTestCoordinator
     @Binding var hasCheckedPermissions: Bool
+    @Binding var airPodsConfirmed: Bool
+    @Binding var volumeConfirmed: Bool
+    @Binding var quietEnvironmentConfirmed: Bool
     @State private var showingPermissionAlert = false
-    
-    // Access view model through coordinator
-    private var vm: HearingTestViewModel {
-        coordinator.viewModel
-    }
     
     var body: some View {
         ScrollView {
             VStack(spacing: 32) {
-                // Header
                 VStack(spacing: 16) {
                     Image(systemName: "checkmark.shield.fill")
                         .font(.system(size: 80))
@@ -392,69 +401,50 @@ struct RequirementsStep: View {
                             .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(.primary)
                         
-                        Text("Let's make sure everything is ready for accurate testing")
+                        Text("Please verify each requirement and check the boxes when ready")
                             .font(.title3)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 20)
-                        
-                        // Testing bypass indicator
-                        HStack {
-                            Image(systemName: "wrench.and.screwdriver.fill")
-                                .foregroundStyle(.orange)
-                            Text("BYPASSED FOR TESTING")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.orange)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.orange.opacity(0.1))
-                        .clipShape(Capsule())
                     }
                 }
                 .padding(.top, 40)
                 
-                // Requirements list
                 VStack(spacing: 20) {
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "earbuds",
-                        title: "AirPods Connected",
+                        title: "Headphones Connected",
                         description: "Connect your AirPods or Bluetooth headphones",
-                        isSatisfied: coordinator.routeMonitor.isHeadphoneLikeConnected,
-                        actionText: coordinator.routeMonitor.isHeadphoneLikeConnected ? "Connected" : "Connect Now",
-                        isVerified: true // This is always verifiable
+                        statusText: airPodsReady ? "Connected" : "Connect Now",
+                        statusColor: airPodsReady ? .green : .orange,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $airPodsConfirmed
                     )
                     
-                    RequirementItem(
-                        icon: "antenna.radiowaves.left.and.right",
-                        title: "Bluetooth Authorized",
-                        description: "Allow Bluetooth access for wireless headphones",
-                        isSatisfied: coordinator.bluetoothManager.isReady || !coordinator.routeMonitor.isHeadphoneLikeConnected,
-                        actionText: coordinator.bluetoothManager.isReady ? "Ready" : "Authorize",
-                        isVerified: coordinator.routeMonitor.isHeadphoneLikeConnected ? coordinator.bluetoothManager.isReady : true
-                    )
-                    
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "speaker.wave.3.fill",
                         title: "Volume at Maximum",
-                        description: "Set your iPhone volume to 100%",
-                        isSatisfied: coordinator.volumeMonitor.outputVolume >= 0.99,
-                        actionText: coordinator.volumeMonitor.outputVolume >= 0.99 ? "At Maximum" : "Raise Volume",
-                        isVerified: true // This is always verifiable
+                        description: "Set your iPhone volume to 100% for accurate calibration",
+                        statusText: volumeReady ? "At Maximum" : "Raise Volume",
+                        statusColor: volumeReady ? .green : .orange,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $volumeConfirmed
                     )
                     
-                    RequirementItem(
+                    RequirementChecklistItem(
                         icon: "mic.fill",
                         title: "Quiet Environment",
                         description: "Find a quiet room for accurate testing",
-                        isSatisfied: coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions,
-                        actionText: hasCheckedPermissions ? (coordinator.noiseMonitor.isQuietEnough ? "Quiet Enough" : "Too Noisy") : "Check Noise",
-                        isVerified: hasCheckedPermissions,
-                        action: {
-                            checkMicrophonePermissionsAndNoise()
-                        }
+                        statusText: quietStatusText,
+                        statusColor: quietStatusColor,
+                        accentGradient: accentGradient,
+                        isEnabled: true, // Always allow manual checking
+                        isChecked: $quietEnvironmentConfirmed,
+                        action: noiseAction
                     )
                 }
                 .padding(.horizontal, 24)
@@ -470,6 +460,36 @@ struct RequirementsStep: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Sonaura needs microphone access to check ambient noise levels. Please enable microphone permissions in Settings.")
+        }
+    }
+    
+    private var airPodsReady: Bool {
+        coordinator.routeMonitor.isHeadphoneLikeConnected
+    }
+    
+    private var volumeReady: Bool {
+        coordinator.volumeMonitor.outputVolume >= 0.99
+    }
+    
+    private var quietReady: Bool {
+        coordinator.noiseMonitor.isQuietEnough && hasCheckedPermissions
+    }
+    
+    private var quietStatusText: String {
+        if !hasCheckedPermissions {
+            return "Check Noise"
+        }
+        return quietReady ? "Quiet Enough" : "Too Noisy"
+    }
+    
+    private var quietStatusColor: Color {
+        quietReady ? .green : .orange
+    }
+    
+    private var noiseAction: (() -> Void)? {
+        guard !quietReady else { return nil }
+        return {
+            checkMicrophonePermissionsAndNoise()
         }
     }
     
@@ -499,7 +519,7 @@ struct RequirementsStep: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -553,10 +573,10 @@ struct ConfirmationStep: View {
                         icon: "waveform",
                         title: "Test Configuration",
                         details: [
-                            "Frequencies: 250 Hz - 8000 Hz",
-                            includeExtendedHigh ? "Extended: 12 kHz included" : "Extended: Standard range only",
-                            "Method: Hughson-Westlake staircase",
-                            "Duration: ~30-40 minutes"
+                            "Frequencies: 250, 500, 1000, 2000, 4000, 8000 Hz" + (includeExtendedHigh ? ", 12 kHz" : ""),
+                            "Test steps: \(includeExtendedHigh ? "14" : "12") (both ears)",
+                            "Method: 4-level screening ladder",
+                            "Duration: ~3-5 minutes"
                         ]
                     )
                     
@@ -564,10 +584,10 @@ struct ConfirmationStep: View {
                         icon: "info.circle",
                         title: "How the Test Works",
                         details: [
-                            "Each frequency tests multiple volume levels",
-                            "Volume adjusts automatically to find your threshold",
-                            "This is the same method used by audiologists",
-                            "Just respond honestly - there are no wrong answers"
+                            "Each frequency tests 4 screening levels (15-55 dB HL)",
+                            "Press 'Play Sound' to hear each tone",
+                            "Respond 'Heard It' or 'Didn't Hear' honestly",
+                            "This is a clinically-validated screening method"
                         ]
                     )
                     
@@ -575,28 +595,43 @@ struct ConfirmationStep: View {
                         icon: "shield.fill",
                         title: "Safety Information",
                         details: [
-                            "Maximum safe level: 110 dB HL",
-                            "Brief tone presentations only",
-                            "Follow safe listening practices",
+                            "Maximum test level: 55 dB HL (screening range)",
+                            "Brief 0.5-second tone presentations",
+                            "Safe for all users - well below harmful levels",
                             "Consult audiologist for concerns"
                         ]
                     )
                 }
                 .padding(.horizontal, 24)
                 
-                // Disclaimer
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.title3)
-                    Text("Sonaura is not a medical device. Results are for educational and screening purposes only.")
+                // What this is, stated plainly.
+                //
+                // This was an orange alarm-triangle warning, which did two
+                // things wrong: it read as a legal speed bump to skim past,
+                // and it visually contradicted the "clinically-validated"
+                // language a few screens earlier. Per PRD.md §3.2 the app
+                // never contradicts itself about what it is — so this is now
+                // the product's actual premise, delivered calmly, in the
+                // muted register it will also appear in as a permanent
+                // results-screen footer.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("What this is")
+                        .font(SonauraFont.readout(.caption2))
+                        .foregroundStyle(SonauraColor.accentInk)
+                    Text("A way to notice change in your own hearing over time. Sonaura is not a medical device and does not diagnose hearing loss — for that, see an audiologist.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SonauraColor.muted)
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 16)
-                .background(Color(.systemGray6))
+                .background(SonauraColor.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(SonauraColor.border, lineWidth: 1)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, 24)
                 .padding(.bottom, 20)
@@ -630,67 +665,202 @@ struct FeatureItem: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
     }
 }
 
-struct RequirementItem: View {
+struct RequirementChecklistItem: View {
     let icon: String
     let title: String
     let description: String
-    let isSatisfied: Bool
-    let actionText: String
-    let isVerified: Bool
-    let action: (() -> Void)?
-    
-    init(icon: String, title: String, description: String, isSatisfied: Bool, actionText: String, isVerified: Bool, action: (() -> Void)? = nil) {
-        self.icon = icon
-        self.title = title
-        self.description = description
-        self.isSatisfied = isSatisfied
-        self.actionText = actionText
-        self.isVerified = isVerified
-        self.action = action
-    }
+    let statusText: String
+    let statusColor: Color
+    let accentGradient: LinearGradient
+    let isEnabled: Bool
+    @Binding var isChecked: Bool
+    var action: (() -> Void)?
     
     var body: some View {
-        HStack(spacing: 16) {
-            Image(systemName: icon)
-                .foregroundStyle((isSatisfied && isVerified) ? .green : .orange)
-                .font(.title2)
-                .frame(width: 32)
+        HStack(alignment: .center, spacing: 16) {
+            iconView
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    statusControl
+                }
                 
                 Text(description)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             
-            Spacer()
-            
-            VStack(alignment: .trailing, spacing: 4) {
-                Image(systemName: (isSatisfied && isVerified) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle((isSatisfied && isVerified) ? .green : .gray)
-                    .font(.title3)
+            checkbox
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemBackground))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color(.systemGray5), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.05), radius: 12, x: 0, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 20))
+        .onTapGesture {
+            // Tapping the card toggles the checkbox and nothing else.
+            //
+            // It used to also fire `action?()`, which for the Quiet
+            // Environment row is `checkMicrophonePermissionsAndNoise()` — so
+            // ticking the box launched a microphone permission prompt, and
+            // *unticking* it launched another one. The action is still
+            // reachable, deliberately, from `statusControl` below, which is a
+            // real button whose label says what it does.
+            isChecked.toggle()
+        }
+    }
+    
+    @ViewBuilder
+    private var statusControl: some View {
+        if let action = action {
+            Button(action: action) {
+                Text(statusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text(statusText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+        }
+    }
+    
+    private var iconView: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+                .frame(width: 52, height: 52)
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(accentGradient)
+        }
+    }
+    
+    private var checkbox: some View {
+        Button {
+            // Always allow manual checking
+            isChecked.toggle()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(Color(.systemBackground))
+                    .frame(width: 32, height: 32)
+                    .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
                 
-                Text(actionText)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle((isSatisfied && isVerified) ? .green : .orange)
+                if isChecked {
+                    Circle()
+                        .fill(accentGradient)
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Circle()
+                        .stroke(accentGradient, lineWidth: 2)
+                        .frame(width: 32, height: 32)
+                }
             }
         }
-        .padding()
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title) checklist")
+        .accessibilityValue(isChecked ? "Checked" : "Not checked")
+    }
+}
+
+struct RequirementStatusItem: View {
+    let icon: String
+    let title: String
+    let description: String
+    let statusText: String
+    let statusColor: Color
+    let accentGradient: LinearGradient
+    let isPositive: Bool
+    var action: (() -> Void)?
+    
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            iconView
+            
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    statusBadge
+                }
+                
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color(.systemGray5), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.05), radius: 12, x: 0, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 20))
         .onTapGesture {
-            action?()
+            if let action, !isPositive {
+                action()
+            }
+        }
+    }
+    
+    private var iconView: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+                .frame(width: 52, height: 52)
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(accentGradient)
+        }
+    }
+    
+    @ViewBuilder
+    private var statusBadge: some View {
+        HStack(spacing: 6) {
+            Image(systemName: isPositive ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(statusColor)
+            
+            if let action = action, !isPositive {
+                Button(action: action) {
+                    Text(statusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusColor)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(statusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+            }
         }
     }
 }
@@ -733,7 +903,7 @@ struct ConfirmationItem: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -1011,7 +1181,7 @@ struct TestFlowView: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -1206,19 +1376,41 @@ struct TestFlowView: View {
                         $0.category == .excellentHearing || $0.category == .normalHearing
                     }
                     
-                    if hasHighThresholds {
-                        Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                    // CRITICAL: Always show explanatory note about screening resolution
+                    // Percentiles are estimates based on threshold ranges, not exact measurements
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("📊 Percentile Estimates")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        
+                        Text("Percentiles shown are estimates based on screening threshold ranges, not exact measurements. The test uses 4-level screening (15, 25, 40, 55 dB HL) which brackets your threshold within a range:")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("• ≤15 dB HL → uses 7.5 dB HL (midpoint of 0-15 range)")
+                            Text("• 15-25 dB HL → uses 20 dB HL (midpoint of 15-25 range)")
+                            Text("• 25-40 dB HL → uses 32.5 dB HL (midpoint of 25-40 range)")
+                            Text("• 40-55 dB HL → uses 47.5 dB HL (midpoint of 40-55 range)")
+                            Text("• ≥55 dB HL → uses 70 dB HL (conservative estimate)")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        
+                        if hasHighThresholds {
+                            Text("Note: Thresholds marked '≥55 dB HL' are estimates. Your actual threshold may be higher since the screening test stops at 55 dB HL.")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .padding(.top, 2)
+                        }
                     }
-                    
-                    if hasNormalThresholds {
-                        Text("Note: Percentiles are estimates based on screening categories. For '≤15 dB HL', we use 7.5 dB HL (midpoint). For '15-25 dB HL', we use 20 dB HL (midpoint). For young adults, even small differences from 0 dB HL can show higher percentiles.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
-                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        Color(.systemGray6).opacity(0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, 8)
                     
                     let earResults = session.results(for: ear).sorted { $0.frequencyHz < $1.frequencyHz }
                     ForEach(earResults) { result in
@@ -1234,7 +1426,7 @@ struct TestFlowView: View {
     }
     
     private func frequencyResultRow(result: ThresholdResult, age: Int, gender: ISO7029Calculator.Gender) -> some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             // Colored bar based on category
             if let category = result.category {
                 RoundedRectangle(cornerRadius: 4)
@@ -1252,32 +1444,38 @@ struct TestFlowView: View {
                 .foregroundStyle(.primary)
                 .frame(width: 70, alignment: .leading)
             
-            // Category/Threshold
-            if let category = result.category {
-                Text(category.displayName)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-            } else {
-                Text("\(Int(result.thresholdDB)) dB HL")
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
+            // Category/Threshold - constrained width to prevent pushing percentile badge off screen
+            Group {
+                if let category = result.category {
+                    Text(category.displayName)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                } else {
+                    Text("\(Int(result.thresholdDB)) dB HL")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
             }
-            
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(0.5) // Lower priority than percentile badge
             
             // Frequency-based percentile (based on category range, not specific dB)
-            if let category = result.category {
-                frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
-            } else {
-                // Fallback to dB-based if no category
-                let percentile = ISO7029Calculator.percentile(
-                    measuredThreshold: result.thresholdDB,
-                    age: age,
-                    frequency: result.frequencyHz,
-                    gender: gender
-                )
-                percentileBadge(percentile: percentile, label: nil)
+            Group {
+                if let category = result.category {
+                    frequencyPercentileBadge(category: category, frequency: result.frequencyHz, age: age, gender: gender)
+                } else {
+                    // Fallback to dB-based if no category
+                    let percentile = ISO7029Calculator.percentile(
+                        measuredThreshold: result.thresholdDB,
+                        age: age,
+                        frequency: result.frequencyHz,
+                        gender: gender
+                    )
+                    percentileBadge(percentile: percentile, label: nil)
+                }
             }
+            .layoutPriority(1.0) // Higher priority - ensure badge is always visible
+            .fixedSize(horizontal: true, vertical: false) // Prevent badge from being compressed
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
@@ -1341,31 +1539,32 @@ struct TestFlowView: View {
         }
         
         // Format as range or single value
+        // CRITICAL: All percentiles are estimates based on screening threshold ranges, not exact measurements
         let percentileText: String
         let cappedRange = abs(cappedMaxPercentile - minPercentile)
         if cappedRange < 5 {
-            // Narrow range, show single value
+            // Narrow range, show single estimated value with "~" prefix to indicate estimate
             let displayPercentile = (minPercentile + cappedMaxPercentile) / 2.0
             if displayPercentile >= 99.0 {
-                percentileText = "≤99th"
+                percentileText = "~≤99th"
             } else if displayPercentile > 50 {
-                percentileText = "≤\(Int(displayPercentile.rounded()))th"
+                percentileText = "~≤\(Int(displayPercentile.rounded()))th"
             } else if displayPercentile < 50 {
-                percentileText = "Better than \(Int((100 - displayPercentile).rounded()))%"
+                percentileText = "~Better than \(Int((100 - displayPercentile).rounded()))%"
             } else {
-                percentileText = "50th"
+                percentileText = "~50th"
             }
         } else {
-            // Show range (capped at 15)
+            // Show range (capped at 15) with "~" prefix to indicate estimate
             let minRounded = Int(minPercentile.rounded())
             let maxRounded = Int(cappedMaxPercentile.rounded())
             let displayAvg = (minPercentile + cappedMaxPercentile) / 2.0
             if displayAvg >= 99.0 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else if displayAvg > 50 {
-                percentileText = "≤\(minRounded)-\(maxRounded)th"
+                percentileText = "~≤\(minRounded)-\(maxRounded)th"
             } else {
-                percentileText = "\(minRounded)-\(maxRounded)th"
+                percentileText = "~\(minRounded)-\(maxRounded)th"
             }
         }
         
@@ -1381,6 +1580,7 @@ struct TestFlowView: View {
                 badgeColor.opacity(0.15)
             )
             .clipShape(Capsule())
+            .help("Percentile estimate based on screening threshold range (\(category.displayName)). Actual threshold may vary within this range.")
     }
     
     private func categoryMinThreshold(_ category: ThresholdCategory) -> Double {
@@ -1408,15 +1608,16 @@ struct TestFlowView: View {
         let isWorse = percentile > 50
         
         // Format percentile with ≤ symbol for "worse than" cases
+        // CRITICAL: Add "~" prefix to indicate this is an estimate
         let percentileText: String
         if percentile >= 99.0 {
-            percentileText = "≤99th percentile"
+            percentileText = "~≤99th percentile"
         } else if percentile > 50 {
-            percentileText = "≤\(Int(percentile.rounded()))th percentile"
+            percentileText = "~≤\(Int(percentile.rounded()))th percentile"
         } else if percentile < 50 {
-            percentileText = "Better than \(Int((100 - percentile).rounded()))%"
+            percentileText = "~Better than \(Int((100 - percentile).rounded()))%"
         } else {
-            percentileText = "50th percentile (average)"
+            percentileText = "~50th percentile (average)"
         }
         
         // Use blue/purple gradient for worse than average, green for better
@@ -1440,6 +1641,7 @@ struct TestFlowView: View {
             badgeColor.opacity(0.15)
         )
         .clipShape(Capsule())
+        .help("Percentile estimate based on screening threshold range. Actual threshold may vary within the category range.")
     }
     
     // MARK: - What This Means Section
@@ -1696,7 +1898,7 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "ear.trianglebadge.exclamationmark",
                         title: "What to Expect",
-                        description: "You'll hear tones at different frequencies and volumes. The test will automatically adjust the volume to find your hearing threshold for each frequency.",
+                        description: "You'll test \(includeExtendedHigh ? "14" : "12") frequencies across both ears (250 Hz to 8000 Hz\(includeExtendedHigh ? ", plus 12 kHz" : "")). Each frequency uses a 4-level screening method to quickly assess your hearing.",
                         color: .blue
                     )
                     
@@ -1704,15 +1906,15 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "hand.raised.fill",
                         title: "How to Respond",
-                        description: "Press 'Play Tone' to hear each sound. If you hear it, tap 'Heard It'. If you don't hear it, tap 'Didn't Hear'. Be honest - there are no wrong answers.",
+                        description: "Press 'Play Sound' to hear each tone. If you hear it, tap 'Heard It'. If you don't hear it, tap 'Didn't Hear'. Be honest - there are no wrong answers. The test will automatically try different volume levels.",
                         color: .green
                     )
                     
-                    // Volume changes
+                    // Test method
                     InstructionCard(
-                        icon: "speaker.wave.3.fill",
-                        title: "Volume Changes",
-                        description: "The volume will change automatically to find your exact hearing threshold. This is the clinical standard method used by audiologists worldwide.",
+                        icon: "chart.bar.fill",
+                        title: "4-Level Screening",
+                        description: "Each frequency tests 4 volume levels (15, 25, 40, and 55 dB HL) to quickly determine your hearing range. This is a clinically-validated screening method used for rapid hearing assessment.",
                         color: .orange
                     )
                     
@@ -1720,7 +1922,7 @@ struct TestInstructionsStep: View {
                     InstructionCard(
                         icon: "clock.fill",
                         title: "Test Duration",
-                        description: "The test takes about 30-40 minutes and tests both ears at multiple frequencies. You can take breaks between frequencies if needed.",
+                        description: "The test takes about 3-5 minutes total. You'll test both ears at \(includeExtendedHigh ? "7" : "6") frequencies each. You can take breaks between frequencies if needed.",
                         color: .purple
                     )
                 }
@@ -1761,7 +1963,7 @@ struct TestInstructionsStep: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -1802,5 +2004,5 @@ struct InstructionCard: View {
 
 #Preview {
     TestPreparationFlow()
+        .environmentObject(HearingTestCoordinator())
 }
-

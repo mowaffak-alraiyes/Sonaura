@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AVFoundation
 
 /// Hearing Test View Model implementing fast 3-level screening protocol
 ///
@@ -55,6 +56,22 @@ final class HearingTestViewModel: ObservableObject {
     @Published var volume: VolumeMonitor!
     @Published var noiseMonitor: AmbientNoiseMonitor!
     
+    // Coordinator reference for audio session management
+    private weak var coordinator: HearingTestCoordinator?
+
+    /// Stable identity for rate limiting, for the lifetime of the install.
+    ///
+    /// Persisted rather than regenerated so the limit actually accumulates
+    /// across calls. Not a user identity and not used for anything else; when
+    /// real accounts exist, swap this for the account id.
+    static let rateLimitIdentity: String = {
+        let key = "com.sonaura.rateLimitIdentity"
+        if let existing = UserDefaults.standard.string(forKey: key) { return existing }
+        let fresh = "install_\(UUID().uuidString)"
+        UserDefaults.standard.set(fresh, forKey: key)
+        return fresh
+    }()
+    
     /// Inject monitors from coordinator (called during coordinator initialization)
     func injectMonitors(
         routeMonitor: AudioRouteMonitor,
@@ -66,6 +83,11 @@ final class HearingTestViewModel: ObservableObject {
         self.bluetooth = bluetooth
         self.volume = volume
         self.noiseMonitor = noiseMonitor
+    }
+    
+    /// Set coordinator reference (called during coordinator initialization)
+    func setCoordinator(_ coordinator: HearingTestCoordinator) {
+        self.coordinator = coordinator
     }
     
     // User configuration
@@ -83,7 +105,7 @@ final class HearingTestViewModel: ObservableObject {
     private var testStartTime: Date?
     
     // Audio
-    private let generator = ToneGenerator()
+    private let tonePlayer = TonePlayer()
     
     // Test configuration
     /// Tone duration: 0.5 seconds per presentation (clinical standard for pure-tone audiometry)
@@ -162,13 +184,58 @@ final class HearingTestViewModel: ObservableObject {
     
     // MARK: - Test Control
     
+    /// Start a new hearing test with rate limiting and input validation
+    /// OWASP: Rate limit user actions to prevent abuse
     func startTest() {
         // BYPASSED FOR TESTING - normally: guard canStart else { return }
         
+        // OWASP: Rate limiting - prevent abuse of test start action
+        Task { @MainActor in
+            do {
+                // Check rate limit before starting test
+                // Stable per-install identity; a fresh UUID per call meant
+                // the rate limit could never be reached. See `rateLimitIdentity`.
+                let userIdentifier = Self.rateLimitIdentity
+                _ = try await AppRateLimiter.checkLimit(
+                    action: "test_start",
+                    identifier: userIdentifier,
+                    config: .testStart
+                )
+                
+                // Validate user inputs before starting
+                if let age = userAge {
+                    _ = try SecurityValidator.validateAge(age)
+                }
+                
+                // Proceed with test start
+                await performTestStart()
+                
+            } catch let error as SecurityValidationError {
+                // Handle rate limit or validation errors gracefully
+                print("⚠️ Security validation failed: \(error.localizedDescription)")
+                currentInstructions = "Please wait a moment before starting another test."
+                // Don't start test if validation fails
+                return
+            } catch {
+                print("❌ Unexpected error: \(error)")
+                return
+            }
+        }
+    }
+    
+    /// Internal method to perform actual test start (separated for rate limiting)
+    @MainActor
+    private func performTestStart() async {
         testStartTime = Date()
         currentStepIndex = 0
         completedResults.removeAll()
         currentStepPresentations.removeAll()
+        
+        // Pre-configure audio session for faster response
+        // Switch to playback mode immediately so tones play instantly when button is pressed
+        if let coordinator = coordinator {
+            await coordinator.beginTonePlaybackSession()
+        }
         
         // Generate test sequence
         steps = makeSteps()
@@ -211,14 +278,30 @@ final class HearingTestViewModel: ObservableObject {
             return
         }
         
+        // Update UI immediately for instant feedback
+        currentInstructions = "Did you hear that beep?"
+        
         print("🔊 Playing sound at level \(currentLevelIndex): \(screeningLevels[currentLevelIndex]) dB HL")
         
-        // Update instructions after playing
-        currentInstructions = "Did you hear that beep?"
+        // Play tone immediately - no blocking checks
         playCurrentTone()
     }
     
     func restart() {
+        // Restore the audio session on the abandon path too.
+        //
+        // Teardown used to run after every single tone, so an abandoned test
+        // happened to get cleaned up by the last one. Now that
+        // `beginTonePlaybackSession()` is correctly paired with exactly one
+        // `endTonePlaybackSession()` at the end of a *completed* test, backing
+        // out mid-test would otherwise leave the session in playback mode with
+        // the noise monitor stopped.
+        Task { @MainActor in
+            if let coordinator = coordinator {
+                await coordinator.endTonePlaybackSession()
+            }
+        }
+
         isRunning = false
         currentStepIndex = 0
         completedResults.removeAll()
@@ -228,6 +311,7 @@ final class HearingTestViewModel: ObservableObject {
         isWaitingForResponse = false
         hasPlayedCurrentTone = false
         currentLevelIndex = 0
+        tonePlayer.stop()
     }
     
     /// Generate test steps with alternating ear order per frequency
@@ -271,19 +355,115 @@ final class HearingTestViewModel: ObservableObject {
         let level = screeningLevels[currentLevelIndex]
         currentPresentationLevel = level
         
-        generator.playCalibrated(
+        // CRITICAL: Verify system volume is at maximum.
+        //
+        // This is a hard gate, not a warning. The whole calibration chain in
+        // `AirPodsCalibration` is derived from a max-SPL figure that assumes
+        // output at 100%; at any lower volume every presented level is
+        // attenuated by an unknown amount and the resulting dB HL numbers are
+        // meaningless. This used to only set an instruction string and then
+        // fall through and play the tone anyway, so a user at 50% volume could
+        // complete an entire test and be handed an audiogram — with nothing in
+        // the exported PDF indicating the result was invalid.
+        //
+        // iOS cannot *set* system volume from an app, but it can decline to
+        // measure until the user does.
+        let systemVolume = volume?.outputVolume ?? 0.0
+        guard systemVolume >= 0.95 else {
+            print("⛔️ BLOCKED: System volume is \(Int(systemVolume * 100))% - 100% is required for a valid measurement")
+            currentInstructions = "Set your iPhone volume to 100%, then tap Play Sound again. Results are only valid at full volume."
+            hasPlayedCurrentTone = false
+            isWaitingForResponse = false
+            return
+        }
+
+        // Spatial audio re-renders both channels and defeats the per-ear
+        // isolation this whole measurement rests on. See
+        // `AudioRouteMonitor.isSpatialAudioActive`.
+        if routeMonitor?.isSpatialAudioActive == true {
+            print("⛔️ BLOCKED: Spatial Audio is active - per-ear isolation is not possible")
+            currentInstructions = "Turn off Spatial Audio for your headphones (Settings › Bluetooth › ⓘ › Spatial Audio › Off), then tap Play Sound again."
+            hasPlayedCurrentTone = false
+            isWaitingForResponse = false
+            return
+        }
+        
+        // Play tone immediately - audio session is already configured
+        // No delays or async waits for instant response
+        let earName = step.ear == .left ? "LEFT" : (step.ear == .right ? "RIGHT" : "BOTH")
+        
+        // Comprehensive logging for debugging
+        print("═══════════════════════════════════════════")
+        print("🔊 TONE PLAYBACK DEBUG")
+        print("═══════════════════════════════════════════")
+        print("   Step: \(currentStepIndex + 1)/\(steps.count)")
+        print("   Level Index: \(currentLevelIndex)/\(screeningLevels.count - 1)")
+        print("   Frequency: \(step.frequencyHz) Hz")
+        print("   Ear: \(earName)")
+        print("   Target Level: \(level) dB HL")
+        print("   System Volume: \(Int(systemVolume * 100))%")
+        
+        let amplitude = amplitudeForTone(frequency: step.frequencyHz, levelDB: level)
+        let earChannel = self.earChannel(for: step.ear)
+        let splLevel = AirPodsCalibration.convertHLtoSPL(hlDB: level, frequency: step.frequencyHz)
+        let maxSPL = airPodsModel.maxOutputSPL(at: step.frequencyHz)
+        let attenuationDB = AirPodsCalibration.attenuationForTargetHL(
+            targetHL: level,
             frequency: step.frequencyHz,
-            levelDB: level,
-            ear: step.ear,
-            duration: toneDuration,
-            airPodsModel: airPodsModel
+            model: airPodsModel
         )
         
+        print("   Target SPL: \(String(format: "%.1f", splLevel)) dB SPL")
+        print("   Max Output SPL: \(String(format: "%.1f", maxSPL)) dB SPL")
+        print("   Attenuation: \(String(format: "%.1f", attenuationDB)) dB")
+        print("   Calculated Amplitude: \(String(format: "%.6f", Double(amplitude)))")
+        print("   Final Amplitude (clamped): \(String(format: "%.6f", Double(amplitude)))")
+        
+        // Verify amplitude is audible (not zero or near-zero)
+        if amplitude < 0.0001 {
+            print("   ❌ ERROR: Amplitude too low - tone may be inaudible!")
+        } else if amplitude < 0.001 {
+            print("   ⚠️ WARNING: Amplitude very low - tone may be barely audible")
+        } else {
+            print("   ✅ Amplitude OK - tone should be audible")
+        }
+        
+        print("   Ear Channel: \(earChannel)")
+        print("   Duration: \(toneDuration)s")
+        print("═══════════════════════════════════════════")
+        
+        // Play tone immediately - no delays, no async waits
+        let didPlay = tonePlayer.playTone(
+            frequency: Double(step.frequencyHz),
+            duration: toneDuration,
+            ear: earChannel,
+            level: amplitude
+        )
+
+        // A refused presentation must not be scored. `playTone` returns false
+        // when the requested level is unreachable on this hardware; treating
+        // that as "played, and not heard" would record a threshold the test
+        // never actually measured.
+        guard didPlay else {
+            currentInstructions = "This level can't be produced on your headphones. Tap Skip to continue."
+            hasPlayedCurrentTone = false
+            isWaitingForResponse = false
+            return
+        }
+
         hasPlayedCurrentTone = true
         isWaitingForResponse = true
+
+        // NOTE: the session teardown that used to live here was removed.
+        // `beginTonePlaybackSession()` is called once per test, but this ran
+        // after *every* tone and also restarted the mic monitor, which forces
+        // HFP mono on Bluetooth headphones — exactly the routing the begin call
+        // exists to avoid. Only the first tone of a test was getting stereo
+        // A2DP. Teardown now happens once, when the test ends.
     }
     
     /// Record user response and handle 4-level ladder progression
+    /// OWASP: Rate limit responses to prevent automated abuse
     func recordResponse(heard: Bool) {
         guard let step = currentStep,
               hasPlayedCurrentTone,
@@ -291,7 +471,54 @@ final class HearingTestViewModel: ObservableObject {
             // If tone hasn't been played yet, ignore response
             return
         }
-        
+
+        // Close the window before suspending.
+        //
+        // The guard above is checked synchronously, but the work below hops
+        // through `Task { @MainActor }` and awaits an actor-isolated rate-limit
+        // check before `performResponseRecording` clears `isWaitingForResponse`.
+        // Two taps landing inside that gap both passed the guard, so a single
+        // presentation was recorded twice — the second append using an
+        // already-advanced `currentLevelIndex` against a stale `step`, which
+        // corrupts `currentStepPresentations` and can skip a level outright.
+        // Clearing here makes the guard mean what it looks like it means.
+        isWaitingForResponse = false
+
+        // OWASP: Rate limiting for test responses (prevents automated responses)
+        Task { @MainActor in
+            do {
+                // A stable per-install identifier. This was
+                // `"user_\(UUID().uuidString)"`, freshly generated on every
+                // call, so the rate-limit key was unique each time and the
+                // limit could never be reached — while `RateLimiter.requestHistory`
+                // gained a permanent entry per call that `cleanup()` never
+                // removed, leaking for the life of the process. SECURITY.md
+                // describes rate limiting as an implemented control; with a
+                // random key it was decorative.
+                let userIdentifier = Self.rateLimitIdentity
+                _ = try await AppRateLimiter.checkLimit(
+                    action: "test_response",
+                    identifier: userIdentifier,
+                    config: .testResponse
+                )
+                
+                // Proceed with response recording
+                await performResponseRecording(heard: heard, step: step)
+                
+            } catch let error as SecurityValidationError {
+                print("⚠️ Rate limit exceeded: \(error.localizedDescription)")
+                // Don't process response if rate limited
+                return
+            } catch {
+                print("❌ Unexpected error: \(error)")
+                return
+            }
+        }
+    }
+    
+    /// Internal method to perform response recording (separated for rate limiting)
+    @MainActor
+    private func performResponseRecording(heard: Bool, step: HearingTestStep) async {
         isWaitingForResponse = false
         
         let currentLevel = screeningLevels[currentLevelIndex]
@@ -385,6 +612,13 @@ final class HearingTestViewModel: ObservableObject {
         
         print("✅ Test complete: \(completedResults.count) results collected")
         
+        // Restore audio session to playAndRecord for monitoring (non-blocking)
+        Task { @MainActor in
+            if let coordinator = coordinator {
+                await coordinator.endTonePlaybackSession()
+            }
+        }
+        
         // Create test session
         let startTime = testStartTime ?? Date() // Use current time if startTime wasn't set
         
@@ -400,6 +634,8 @@ final class HearingTestViewModel: ObservableObject {
             userAge: userAge,
             userGender: userGender
         )
+        
+        tonePlayer.stop()
         
         print("✅ Test session created: \(testSession != nil) with \(completedResults.count) results")
     }
@@ -443,5 +679,29 @@ final class HearingTestViewModel: ObservableObject {
             frequency: frequency,
             gender: userGender
         )
+    }
+    
+    private func amplitudeForTone(frequency: Int, levelDB: Double) -> Float {
+        let amplitude = AirPodsCalibration.amplitudeForTargetHL(
+            targetHL: levelDB,
+            frequency: frequency,
+            model: airPodsModel
+        )
+        
+        // Clamp to valid range (AirPodsCalibration already applies minimum, but ensure max)
+        let safeAmplitude = max(0.0, min(1.0, Float(amplitude)))
+        
+        return safeAmplitude
+    }
+    
+    private func earChannel(for ear: TestEar) -> EarChannel {
+        switch ear {
+        case .left:
+            return .left
+        case .right:
+            return .right
+        case .both:
+            return .both
+        }
     }
 }

@@ -11,6 +11,8 @@ import SwiftData
 @main
 struct SonauraApp: App {
     let modelContainer: ModelContainer
+    @StateObject private var coordinator = HearingTestCoordinator()
+    @State private var showSplash = true
     
     init() {
         do {
@@ -24,9 +26,22 @@ struct SonauraApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .modelContainer(modelContainer)
-                .environmentObject(HearingTestCoordinator())
+            ZStack {
+                if showSplash {
+                    SplashView(isPresented: $showSplash)
+                        .transition(.opacity)
+                } else {
+                    ContentView()
+                        .environmentObject(coordinator)
+                        .modelContainer(modelContainer)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: showSplash)
+            .onAppear {
+                // Request Bluetooth authorization when app launches
+                coordinator.bluetoothManager.requestAccess()
+            }
         }
     }
 }

@@ -181,7 +181,7 @@ struct SettingsView: View {
                 Divider()
                 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Sonaura uses clinically-validated hearing assessment methods including:")
+                    Text("How your reading is produced:")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     
@@ -199,7 +199,7 @@ struct SettingsView: View {
                     Text("Why Sonaura?")
                         .font(.headline)
                         .foregroundStyle(.primary)
-                    Text("We set out to make evidence-based hearing insights accessible at home. Every tone, comparison, and safety check you see in the app ties directly back to peer-reviewed audiology standards.")
+                    Text("We set out to make it easy to notice gradual change in your own hearing at home. Every tone, comparison, and safety check you see in the app ties directly back to peer-reviewed audiology standards.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -236,7 +236,7 @@ struct SettingsView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                         .font(.title3)
-                    Text("Sonaura is not a medical device. Results are for educational and screening purposes only. For diagnosis or treatment, consult a licensed audiologist.")
+                    Text("Sonaura is not a medical device. It is built to help you notice change in your own hearing over time, not to diagnose it. For diagnosis or treatment, see a licensed audiologist.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
@@ -260,7 +260,7 @@ struct SettingsView: View {
                     Image(systemName: "book.closed.fill")
                         .foregroundStyle(accentGradient)
                         .font(.title2)
-                    Text("Works Cited")
+                    Text("How this works")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.primary)
                     Spacer()
@@ -303,7 +303,7 @@ struct SettingsView: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -328,7 +328,7 @@ struct InfoRow: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -392,7 +392,7 @@ struct AboutHighlightRow: View {
     
     private var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [Color.blue, Color.purple],
+            colors: [SonauraColor.accent, SonauraColor.accent],
             startPoint: .leading,
             endPoint: .trailing
         )
